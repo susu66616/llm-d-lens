@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ArrowRight, CheckCircle2, SlidersHorizontal, Sparkles } from 'lucide-react';
-import { Badge, Button, Checkbox, Input, Panel, Select } from '../../../shared/ui';
+import { Badge, Button, Checkbox, Input, Panel, Select, Textarea } from '../../../shared/ui';
 import { DEFAULT_REQUIREMENTS } from '../api/agenticDeploymentBackend';
 
 const mechanisms = [
@@ -25,10 +25,20 @@ export function DeploymentRequirementsForm({ mode = 'manual', initialValue, onSu
             <div className="grid lg:grid-cols-[minmax(0,1fr)_18rem]">
                 <fieldset disabled={disabled} className="min-w-0 space-y-6 p-6">
                     <div>
-                        <Badge tone={mode === 'manual' ? 'brand' : 'violet'}>Deployment goals</Badge>
-                        <h3 className="mt-3 text-lg font-semibold text-theme-text">What will you use this model for?</h3>
+                        <Badge tone={mode === 'manual' ? 'brand' : 'violet'}>{mode === 'manual' ? 'Manual configuration' : 'Goal and constraints'}</Badge>
+                        <h3 className="mt-3 text-lg font-semibold text-theme-text">{mode === 'manual' ? 'Choose your deployment configuration' : 'What should the deployment achieve?'}</h3>
                         <p className="mt-1 text-sm text-theme-muted">Start with the suggested settings. You can inspect and edit the plan before anything is deployed.</p>
                     </div>
+                    {mode === 'manual' && <label className="block text-sm text-theme-text">Deployment method
+                        <Select className="mt-1.5" value={value.providerRef} onChange={patch('providerRef')}>
+                            <option value="">Select a compatible method automatically</option>
+                            <option value="optimized-baseline">Aggregated serving</option>
+                            <option value="pd-disaggregation">Prefill / Decode separation</option>
+                            <option value="precise-prefix-cache-routing">Prefix-aware routing</option>
+                            <option value="tiered-prefix-cache">Tiered prefix cache</option>
+                        </Select>
+                        <span className="mt-2 block text-xs text-theme-muted">An explicit method is a hard constraint. Lens checks workload prerequisites and current cluster support; it will not silently substitute another method. Edit role replicas, parallelism and runtime settings in the generated plan.</span>
+                    </label>}
                     <div className="grid gap-5 md:grid-cols-2">
                         <label className="block text-sm text-theme-text">Workload
                             <Select className="mt-1.5" value={value.useCase} onChange={patch('useCase')}>
@@ -58,13 +68,17 @@ export function DeploymentRequirementsForm({ mode = 'manual', initialValue, onSu
                         <span className="mt-2 block text-xs text-theme-muted">Choose yes to consider prefix-aware routing and reusable cache where supported.</span>
                     </label>
                     {mode === 'agentic' && children}
+                    {mode === 'agentic' && <label className="block text-sm text-theme-text">Deployment preference (optional)
+                        <Textarea className="mt-1.5" value={value.plannerPrompt} maxLength={1800} onChange={patch('plannerPrompt')} placeholder="Explain tradeoffs the AI planner should consider." />
+                        <span className="mt-2 block text-xs text-theme-muted">AI guidance supplements the structured limits below. Built-in rules use the structured fields; preference text cannot override resource or compatibility checks.</span>
+                    </label>}
                     <details className="border-t border-theme-border pt-4">
                         <summary className="cursor-pointer text-sm font-medium text-theme-text"><SlidersHorizontal size={14} className="mr-2 inline" />Advanced settings <span className="font-normal text-theme-muted">— optional</span></summary>
                         <div className="mt-5 space-y-6">
                             <section className="space-y-3">
                                 <h4 className="text-sm font-semibold">Expected request size</h4>
                                 <p className="text-xs text-theme-muted">Suggested token counts are planning assumptions, not observed traffic. Adjust them to your workload; clearing a value leaves it unspecified.</p>
-                                <div className="grid gap-4 md:grid-cols-2">{number('inputTokens', 'Input tokens per request', 'Not specified')}{number('outputTokens', 'Output tokens per request', 'Not specified')}</div>
+                                <div className="grid gap-4 md:grid-cols-2">{number('inputTokens', 'Mean input tokens per request', 'Not specified')}{number('p95InputTokens', 'P95 input tokens per request', 'Unknown; not inferred from mean')}{number('outputTokens', 'Mean output tokens per request', 'Not specified')}</div>
                             </section>
                             <section className="space-y-3">
                                 <h4 className="text-sm font-semibold">Resource and performance limits</h4>
@@ -72,8 +86,9 @@ export function DeploymentRequirementsForm({ mode = 'manual', initialValue, onSu
                                     {number('maxAccelerators', 'Maximum accelerators', 'Use currently free capacity')}
                                     {number('concurrency', 'Concurrent requests', 'No load target')}
                                     {number('requestRate', 'Request rate (QPS)', 'No load target')}
-                                    {number('ttftMs', 'Time to first token (ms)', 'No latency target')}
-                                    {number('tpotMs', 'Time per output token (ms)', 'No latency target')}
+                                    {number('ttftMs', 'P95 time to first token (ms)', 'No latency target')}
+                                    {number('tpotMs', 'P95 time per output token (ms)', 'No latency target')}
+                                    {number('e2eMs', 'P95 end-to-end latency (ms)', 'No latency target')}
                                 </div>
                                 <p className="text-xs text-theme-muted">Specify concurrency or request rate, not both. Only set a latency target if your application requires one. Targets need prediction or measurement to verify.</p>
                             </section>

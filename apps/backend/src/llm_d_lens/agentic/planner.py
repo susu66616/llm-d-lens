@@ -596,12 +596,18 @@ class DeterministicPlanner:
         score_input = self._performance_score_input(facts, candidate)
         if self._usable_performance_evidence(score_input):
             assert score_input is not None
+            if self._performance_slo_passes(facts, score_input) and facts.end_to_end_latency_slo_ms is not None:
+                # Aggregated planning evidence has no end-to-end percentile.
+                # TTFT/TPOT cannot establish this additional target.
+                return "unknown", 0
             return (
                 "satisfied" if self._performance_slo_passes(facts, score_input) else "not_satisfied",
                 score_input.confidence,
             )
         prediction = self._aic_prediction(facts, candidate)
         if prediction is not None:
+            if self._aic_slo_passes(facts, prediction) and facts.end_to_end_latency_slo_ms is not None:
+                return "unknown", 0
             return ("satisfied" if self._aic_slo_passes(facts, prediction) else "not_satisfied"), 0.8
         return "unknown", 0
 

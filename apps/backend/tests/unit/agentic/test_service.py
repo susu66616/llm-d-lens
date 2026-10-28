@@ -1923,3 +1923,36 @@ def test_approve_rejects_a_candidate_when_preflight_capacity_validation_fails(mo
         ValueError, match="(fails pre-flight capacity validation|satisfies current resource constraints)"
     ):
         asyncio.run(service.approve(run.id))
+
+
+def test_explicit_provider_is_a_hard_constraint_without_fallback(monkeypatch):
+    service = _shared_service(monkeypatch)
+    run = asyncio.run(service.create(_shared_request(
+        workload={"prefillHeavy": True},
+        hard_constraints={"maxAccelerators": 2, "providerRef": "optimized-baseline"},
+    )))
+    assert run.selected_candidate.provider_ref == "optimized-baseline"
+    assert all(candidate.provider_ref == "optimized-baseline" for candidate in run.candidates)
+    assert any("explicitly selected" in reason for candidate in run.rejected_candidates for reason in candidate.rejection_reasons)
+    with pytest.raises(ValueError, match="no deployable"):
+        asyncio.run(service.create(_shared_request(
+            hard_constraints={"maxAccelerators": 1, "providerRef": "pd-disaggregation"},
+            workload={"prefillHeavy": True},
+        )))
+    with pytest.raises(ValueError, match="Unsupported planning provider"):
+        asyncio.run(service.create(_shared_request(hard_constraints={"providerRef": "unregistered-provider"})))
+
+
+def test_shared_planning_preserves_percentiles_end_to_end_target_and_preference(monkeypatch):
+    service = _shared_service(monkeypatch)
+    request = _shared_request(
+        workload={"inputTokens": 1024, "p95InputTokens": 4096, "outputTokens": 128},
+        performance_targets={"e2eMs": 2000},
+    ).model_copy(update={"planner_prompt": "Prefer simpler operations."})
+    run = asyncio.run(service.create(request))
+    assert run.request.planning_facts.workload_profile.mean_input_tokens == 1024
+    assert run.request.planning_facts.workload_profile.p95_input_tokens == 4096
+    assert run.request.planning_facts.end_to_end_latency_slo_ms == 2000
+    assert run.request.planner_prompt == "Prefer simpler operations."
+    unknown = asyncio.run(service.create(_shared_request(workload={"inputTokens": 1024})))
+    assert unknown.request.planning_facts.workload_profile.p95_input_tokens is None

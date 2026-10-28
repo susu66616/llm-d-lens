@@ -127,3 +127,19 @@ test('agentic recalculation streams through the run-specific refine endpoint', a
         ['complete', { id: 'run/1', status: 'awaiting_approval' }],
     ]);
 });
+
+
+test('explicit method, workload percentiles and all SLOs survive planning and restoration', () => {
+    const values = { ...DEFAULT_REQUIREMENTS, providerRef: 'optimized-baseline', p95InputTokens: '8192',
+        e2eMs: '2000', plannerPrompt: 'Prefer simpler operations.' };
+    const request = deploymentPlanningRequest(draft, values, 'session-a', 'agentic');
+    assert.equal(request.requirements.hard_constraints.providerRef, 'optimized-baseline');
+    assert.equal(request.planning_facts.workload_profile.mean_input_tokens, 1024);
+    assert.equal(request.planning_facts.workload_profile.p95_input_tokens, 8192);
+    assert.equal(request.planning_facts.end_to_end_latency_slo_ms, 2000);
+    assert.deepEqual(requirementsFromRun({ request }), values);
+    assert.equal(deploymentPlanningRequest(draft, DEFAULT_REQUIREMENTS, 'session-a', 'manual').planning_facts.workload_profile.p95_input_tokens, null);
+    for (const invalid of [{ p95InputTokens: '-1' }, { p95InputTokens: '2.5' }, { e2eMs: '0' }, { plannerPrompt: 'x'.repeat(1801) }]) {
+        assert.throws(() => deploymentPlanningRequest(draft, { ...values, ...invalid }, 'session-a', 'agentic'));
+    }
+});

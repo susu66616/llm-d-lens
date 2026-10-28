@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pelican on wheels</title>
+<style>
+:root{color-scheme:light;font-family:Georgia,serif;color:#263e3a;background:#f6f0e3}*{box-sizing:border-box}body{margin:0;min-height:100svh;display:grid;place-items:center;padding:32px}main{width:min(1080px,100%)}header{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:0 4px 24px}.eyebrow{font:11px/1.5 system-ui,sans-serif;letter-spacing:3px;text-transform:uppercase;color:#687e72}h1{font-size:clamp(32px,5vw,58px);font-weight:normal;letter-spacing:-2px;margin:9px 0 0}header span{font-style:italic;color:#778577}.scene{overflow:hidden;border:1px solid #dddaca;border-radius:22px;background:#e4eee5;box-shadow:0 22px 70px #394d3520}svg{display:block;width:100%;height:auto}footer{display:flex;justify-content:space-between;align-items:center;gap:22px;padding:23px 4px;font:12px system-ui,sans-serif;color:#6d7b70}.controls{display:flex;align-items:center;gap:18px}button{font:inherit;color:#263e3a;background:transparent;border:1px solid #aebbad;border-radius:30px;padding:10px 20px;cursor:pointer;min-width:100px}button:hover{background:#e3e9dc}button:focus-visible,input:focus-visible{outline:3px solid #c96645;outline-offset:4px}label{display:flex;align-items:center;gap:10px}input{width:95px;accent-color:#3c7569}#rider{transform-origin:500px 340px}@media(max-width:600px){body{padding:18px}header span{display:none}footer{align-items:flex-start;flex-direction:column}.controls{width:100%;justify-content:space-between}}
+</style>
+</head>
+<body>
+<main>
+<header><div><div class="eyebrow">Little journeys / No. 01</div><h1>Pelican on wheels.</h1></div><span>Taking the scenic route.</span></header>
+<div class="scene">
+<svg id="scene" viewBox="0 0 1000 610" role="img" aria-labelledby="title description" xmlns="http://www.w3.org/2000/svg">
+<title id="title">A pelican riding a bicycle beside the sea</title>
+<desc id="description">A white pelican with a long orange bill and a green scarf pedals a coral bicycle along a coastal road. Clouds and plants drift past.</desc>
+<defs>
+<linearGradient id="sky" x2="0" y2="1"><stop stop-color="#e2eee5"/><stop offset="1" stop-color="#f7efd7"/></linearGradient>
+<linearGradient id="pouch" x2="0" y2="1"><stop stop-color="#f3b559"/><stop offset="1" stop-color="#e5894e"/></linearGradient>
+<pattern id="water" width="140" height="32" patternUnits="userSpaceOnUse"><path d="M12 20h38m36-10h19" fill="none" stroke="#e3eee2" stroke-width="2" stroke-linecap="round"/></pattern>
+<g id="cloud" fill="#fffaf0"><path d="M0 24C-3 9 15 0 28 10 30-12 66-11 71 10 88 0 107 10 104 24Z"/></g>
+<g id="plant" fill="none" stroke="#648678" stroke-width="3" stroke-linecap="round"><path d="M0 0Q-3-28-19-44M0 0Q0-35 16-57M0 0Q15-25 30-29"/><path d="M-11-25q-20 0-18-16 16 0 18 16M8-32q-6-20 8-27 8 15-8 27M17-18q0-17 16-16 0 14-16 16" fill="#648678" stroke="none"/></g>
+<g id="wheel"><circle r="76" fill="#f9f4e4" stroke="#304944" stroke-width="10"/><circle r="67" fill="none" stroke="#d3c9ae" stroke-width="2"/><g stroke="#9bafa0" stroke-width="2"><path d="M-66 0H66M0-66V66M-47-47L47 47M-47 47L47-47M-25-61L25 61M-61-25L61 25M-61 25L61-25M-25 61L25-61"/></g><circle r="8" fill="#304944"/></g>
+</defs>
+<path fill="url(#sky)" d="M0 0h1000v610H0z"/>
+<circle cx="775" cy="126" r="55" fill="#edc981"/><circle cx="775" cy="126" r="70" fill="none" stroke="#edc981" opacity=".25"/>
+<g id="clouds" opacity=".85"><use href="#cloud" x="120" y="102"/><use href="#cloud" x="535" y="66" transform="translate(135 0) scale(.8)"/><use href="#cloud" x="890" y="173"/></g>
+<path d="M0 308Q100 257 207 295T430 293Q570 237 710 289T1000 275V400H0Z" fill="#b9cfc1"/>
+<path d="M0 338Q240 320 460 341T1000 329V456H0Z" fill="#94bdb1"/>
+<path d="M0 349H1000V454H0Z" fill="url(#water)" opacity=".65"/>
+<path d="M0 414Q220 382 465 422T1000 403V610H0Z" fill="#e7d8ad"/>
+<path d="M0 470Q430 442 1000 465V550Q500 521 0 550Z" fill="#f4e9cc"/>
+<path d="M0 550Q500 521 1000 550" stroke="#d8c596" fill="none" stroke-width="2"/>
+<g id="road" stroke="#d3c49d" stroke-width="3" stroke-linecap="round"><path d="M30 500h45m150 7h28m185-8h42m170 8h25m155-10h40"/></g>
+<ellipse cx="502" cy="506" rx="219" ry="17" fill="#7c8768" opacity=".15"/>
+<g id="bike">
+<g transform="translate(358 424)"><g id="rear"><use href="#wheel"/></g></g>
+<g transform="translate(650 424)"><g id="front"><use href="#wheel"/></g></g>
+<g fill="none" stroke-linecap="round" stroke-linejoin="round">
+<path d="M358 424L432 306 490 424H358L580 321 490 424M580 321L650 424" stroke="#a84e3c" stroke-width="12"/>
+<path d="M358 424L432 306 490 424H358L580 321 490 424M580 321L650 424" stroke="#d87858" stroke-width="7"/>
+<path d="M432 306L422 280M580 321L563 278Q560 268 572 267L603 267" stroke="#354e47" stroke-width="7"/>
+<path d="M401 282H444" stroke="#30473f" stroke-width="12"/>
+<path d="M584 269H605" stroke="#a67b51" stroke-width="9"/>
+<path d="M605 272Q637 296 620 326" stroke="#728b7e" stroke-width="2"/>
+</g>
+<path d="M358 414L490 407Q511 407 511 424T490 441L358 434Z" fill="none" stroke="#677c69" stroke-width="3"/>
+<circle cx="490" cy="424" r="22" fill="#426258"/><circle cx="490" cy="424" r="15" fill="none" stroke="#c8c9a3" stroke-width="2"/>
+<g id="far-leg" fill="none" stroke="#ca8c42" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"><path id="far-leg-path" d="M449 285L443 351 467 424"/><path id="far-foot" d="M457 424h25"/></g>
+<g id="rider">
+<path d="M390 260L350 225 407 239" fill="#d8dfcc" stroke="#304b44" stroke-width="3" stroke-linejoin="round"/>
+<path d="M390 234C397 190 443 176 481 196 507 210 522 219 533 189L540 150C541 120 574 112 591 132 611 156 588 196 582 218 572 255 558 281 518 294 467 313 402 291 390 264Z" fill="#fffbed" stroke="#304b44" stroke-width="3"/>
+<path d="M410 234C434 211 477 222 500 253 476 274 431 277 410 234Z" fill="#dce4d2" stroke="#536e60" stroke-width="2.5"/>
+<path d="M425 238Q449 253 476 251M428 247Q447 264 464 261" fill="none" stroke="#a8baa5" stroke-width="2" stroke-linecap="round"/>
+<path d="M585 155L727 164Q664 213 597 182Z" fill="url(#pouch)" stroke="#775a39" stroke-width="2.5"/>
+<path d="M584 151Q662 146 731 164L588 168Z" fill="#f6c263" stroke="#775a39" stroke-width="2.5" stroke-linejoin="round"/>
+<circle cx="575" cy="142" r="5.5" fill="#263e39"/><circle cx="576.5" cy="140.5" r="1.5" fill="white"/>
+<path d="M551 122l-6-12m13 10 1-14" stroke="#304b44" stroke-width="3" stroke-linecap="round"/>
+<path d="M535 190Q555 204 583 198L579 211Q550 214 532 202Z" fill="#3d8274"/>
+<path id="scarf" d="M539 201Q506 191 482 201L488 212 473 221Q516 223 545 206" fill="#3d8274"/>
+<path d="M507 232Q534 259 590 266" fill="none" stroke="#304b44" stroke-width="16" stroke-linecap="round"/><path d="M507 230Q534 257 590 264" fill="none" stroke="#f7f5e6" stroke-width="11" stroke-linecap="round"/>
+</g>
+<g fill="none" stroke-linecap="round" stroke-linejoin="round"><path id="near-leg" d="M472 291L521 343 513 424" stroke="#e6a14b" stroke-width="11"/><path id="near-foot" d="M503 424h27" stroke="#e6a14b" stroke-width="10"/><path id="crank" d="M467 424H513" stroke="#334e45" stroke-width="5"/><path id="pedal-a" d="M501 431h25" stroke="#334e45" stroke-width="6"/><path id="pedal-b" d="M455 431h25" stroke="#334e45" stroke-width="6"/></g>
+<circle cx="490" cy="424" r="5" fill="#f2dba6"/>
+</g>
+<g id="plants"><use href="#plant" x="95" y="571"/><use href="#plant" x="880" y="568"/></g>
+<g fill="none" stroke="#658578" stroke-width="2" stroke-linecap="round"><path d="M302 139q8-10 16 0 8-10 16 0M338 117q6-7 12 0 6-7 12 0"/></g>
+<text x="40" y="575" fill="#7e896e" font-family="system-ui, sans-serif" font-size="10" letter-spacing="3">A LITTLE SEA BREEZE. A LITTLE PEDAL POWER.</text>
+</svg>
+</div>
+<footer><span>Nowhere to rush. Just enjoy the ride.</span><div class="controls"><button id="toggle" type="button" aria-pressed="false">Pause ride</button><label for="speed">Speed <input id="speed" type="range" min="0.4" max="2" step="0.1" value="1"><output id="speed-value" for="speed">1.0×</output></label></div></footer>
+</main>
+<script>
+const el = id => document.getElementById(id);
+// Repeat scenery beyond the viewport so wrapping stays seamless.
+for (const [id, width] of [['plants', 1000], ['road', 1000], ['clouds', 1100]]) {
+ const group = el(id);
+ const copy = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+ copy.setAttribute('transform', `translate(${width} 0)`);
+ for (const child of [...group.children]) copy.appendChild(child.cloneNode(true));
+ group.appendChild(copy);
+}
+const motion = matchMedia('(prefers-reduced-motion: reduce)');
+let paused = motion.matches, elapsed = 0, previous = null;
+function updateButton() { el('toggle').textContent = paused ? 'Resume ride' : 'Pause ride'; el('toggle').setAttribute('aria-pressed', String(paused)); }
+el('toggle').addEventListener('click', () => { paused = !paused; updateButton(); });
+motion.addEventListener('change', event => { paused = event.matches; updateButton(); });
+el('speed').addEventListener('input', () => { el('speed-value').value = Number(el('speed').value).toFixed(1) + '×'; });
+function draw(t) {
+ const angle = t * Math.PI * 2 / 1.7, dx = Math.cos(angle)*27, dy = Math.sin(angle)*27;
+ const ax = 490+dx, ay = 424+dy, bx = 490-dx, by = 424-dy;
+ el('near-leg').setAttribute('d', `M472 291 Q${530+dx*.3} ${348+dy*.3} ${ax} ${ay}`);
+ el('far-leg-path').setAttribute('d', `M449 285 Q${443-dx*.3} ${349-dy*.3} ${bx} ${by}`);
+ for (const [id,x,y] of [['near-foot',ax,ay],['far-foot',bx,by],['pedal-a',ax,ay+6],['pedal-b',bx,by+6]]) el(id).setAttribute('d',`M${x-10} ${y}h25`);
+ el('crank').setAttribute('d',`M${bx} ${by}L${ax} ${ay}`);
+ for(const id of ['front','rear']) el(id).setAttribute('transform',`rotate(${t*180})`);
+ el('rider').setAttribute('transform',`translate(0 ${Math.sin(angle*2)*1.8})`);
+ el('scarf').setAttribute('transform',`rotate(${Math.sin(angle*2)*3} 540 202)`);
+ el('plants').setAttribute('transform',`translate(${-((t*110)%1000)} 0)`);
+ el('road').setAttribute('transform',`translate(${-((t*110)%1000)} 0)`);
+ el('clouds').setAttribute('transform',`translate(${-(t*7)%1100} 0)`);
+}
+function tick(now) { if(previous !== null && !paused) elapsed += Math.min((now-previous)/1000,.05)*Number(el('speed').value); previous=now; draw(elapsed); requestAnimationFrame(tick); }
+updateButton(); requestAnimationFrame(tick);
+</script>
+</body>
+</html>

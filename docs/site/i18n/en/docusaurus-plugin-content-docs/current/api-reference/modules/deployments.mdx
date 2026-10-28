@@ -31,6 +31,17 @@ In addition to the Standard serving and active-session fields:
 - `requirements`: model and cluster identity, objective, `hard_constraints.maxAccelerators`,
   workload, performance targets, required/forbidden mechanism IDs and unknown fields.
   Supported mechanism controls are `pd_disaggregation`, `prefix_routing` and `external_kv_cache`.
+- `requirements.hard_constraints.providerRef`: optional explicit provider recipe.
+  Supported recipes are `optimized-baseline`, `pd-disaggregation`,
+  `precise-prefix-cache-routing` and `tiered-prefix-cache`. Other recipes are
+  rejected; mismatching candidates are excluded at planning, revision and approval.
+- `requirements.workload.p95InputTokens`: optional positive input-length percentile,
+  independent of mean `inputTokens`; omission stays unknown.
+- `requirements.performance_targets.e2eMs`: optional positive integer end-to-end
+  P95 latency target in milliseconds, alongside `ttftMs` and `tpotMs`. Trial ranking
+  requires every completed repetition to satisfy configured targets.
+- `planner_prompt`: optional guidance preserved for AI-assisted planning. Structured
+  constraints still govern validation; Manual does not call an external AI provider.
 - `planning_facts.max_candidates`: retained-candidate limit, 1–10 for the shared workflow.
   Live free resources override client-supplied hardware facts.
 - `execution_policy.max_total_duration_minutes`: planning deadline, 1–180.
@@ -147,6 +158,11 @@ until real planning; it no longer invents candidate rankings.
 
 </TabItem>
 <TabItem value="python-api" label="Python API">
+
+`DeploymentRequirements` accepts the same optional `providerRef`, `p95InputTokens`
+and `e2eMs` dictionary fields described in the REST contract. `create` preserves the
+independent percentile, normalizes the end-to-end target into planning facts and
+filters candidates by the explicitly selected provider before ranking.
 
 `AgenticDeploymentService.create` owns shared decision planning;
 `revise_candidate` revalidates edits and preserves the original.

@@ -31,19 +31,22 @@ class DeploymentRequirements(BaseModel):
         budget = self.hard_constraints.get("maxAccelerators")
         if budget is not None and (isinstance(budget, bool) or not isinstance(budget, int) or budget < 1):
             raise ValueError("maxAccelerators must be a positive whole number.")
-        if set(self.hard_constraints) - {"maxAccelerators"}:
+        if set(self.hard_constraints) - {"maxAccelerators", "providerRef"}:
             raise ValueError("Unsupported hard constraint; it cannot be silently ignored.")
+        provider = self.hard_constraints.get("providerRef")
+        if provider is not None and (not isinstance(provider, str) or not provider.strip()):
+            raise ValueError("providerRef must be a non-empty provider identifier or null.")
         for key in ("prefixReuse", "prefillHeavy"):
             if self.workload.get(key) is not None and not isinstance(self.workload[key], bool):
                 raise ValueError(f"{key} must be true, false or null.")
-        for key in ("inputTokens", "outputTokens", "concurrency", "requestRate"):
+        for key in ("inputTokens", "p95InputTokens", "outputTokens", "concurrency", "requestRate"):
             value = self.workload.get(key)
             if value is not None and (
                 isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0
             ):
                 raise ValueError(f"{key} must be a positive number or null.")
         for key, value in self.performance_targets.items():
-            if key not in {"ttftMs", "tpotMs"}:
+            if key not in {"ttftMs", "tpotMs", "e2eMs"}:
                 raise ValueError(f"Unsupported performance target: {key}.")
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
                 raise ValueError(f"{key} must be a positive whole number or null.")

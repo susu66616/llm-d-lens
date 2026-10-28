@@ -130,8 +130,14 @@ The entry is `apps/frontend/src/pages/model-market/ui/ModelMarketPage.jsx`.
 both modes; `ManualDeploymentWorkspace.jsx` selects deterministic mode.
 
 - Model, cluster and ready model cache precede a compact Manual workload/preference
-  form with expandable optional constraints. Agentic retains three-step inputs.
+  form with expandable optional constraints. Agentic separates candidate comparison,
+  optional measured trials, review and live deployment execution into workspace views.
   Blank values remain unknown; cluster inventory is backend-discovered.
+- Manual can pin `requirements.hard_constraints.providerRef`; candidate filtering,
+  revision checks and approval enforce it without substituting another provider.
+  Mean input length and optional P95 input length remain independent. TTFT, TPOT
+  and end-to-end targets are normalized from shared requirements. AI preference
+  text is preserved alongside the hard constraints.
 - New requests carry `planning_mode` and structured `requirements`. Manual never
   calls external AI. It expands the existing source-bound CPU cache adapters,
   ranks target evidence, coverage and explicit objective rules, and then prefers

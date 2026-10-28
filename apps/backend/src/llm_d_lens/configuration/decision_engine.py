@@ -195,6 +195,9 @@ def candidate_requirement_errors(requirements, candidate) -> list[str]:
         return []
     mechanisms = candidate_mechanisms(candidate)
     errors = []
+    provider = requirements.hard_constraints.get("providerRef")
+    if provider is not None and candidate.provider_ref != provider:
+        errors.append(f"Provider {provider} was explicitly selected; this candidate uses {candidate.provider_ref}.")
     budget = requirements.hard_constraints.get("maxAccelerators")
     if budget is not None and candidate.required_gpus > budget:
         errors.append(f"Requires {candidate.required_gpus} accelerators; the hard limit is {budget}.")

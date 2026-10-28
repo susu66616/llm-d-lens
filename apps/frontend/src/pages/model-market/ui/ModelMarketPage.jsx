@@ -101,7 +101,7 @@ export default function ModelMarketPage({ onNavigate, isActive = true }) {
         const defaults = standardRecommendation(selected, hardware);
         setDraft({
             model: selected.repository, modelWeightGiB: selected.weightGiB || selected.sizeGiB,
-            deploymentName: name, description, clusterId: cluster, storageVolumeId: storage,
+            deploymentName: name, description, clusterId: cluster, clusterName: clusters.find(item => item.id === cluster)?.name, storageVolumeId: storage,
             contextLength: defaults.maxModelLen, gpuMemoryUtilization: 0.9,
             maxNumSeqs: 256, maxNumBatchedTokens: 8192, vllmArguments: selected.vllmArguments || [],
         });
@@ -125,7 +125,7 @@ export default function ModelMarketPage({ onNavigate, isActive = true }) {
         <Button className="self-start" variant="secondary" onClick={() => { setSelected(null); setDraft(null); }}><ArrowLeft size={15} />Model Catalog</Button>
         {!allowed ? <EmptyState title="Your role cannot create deployments" message="Use an existing deployment or request deployment-create permission." action={<Button onClick={() => onNavigate('optimization-deployments')}>Open Deployments</Button>} /> : draft ? <>
             <Panel title={selected.name} actions={<Badge tone="neutral">{mode === 'manual' ? 'Manual' : 'Agentic'}</Badge>}><p className="text-sm text-theme-muted">{name} / {clusters.find(item => item.id === cluster)?.name || cluster}</p></Panel>
-            <Workspace key={`${mode}:${draft.clusterId}:${draft.model}:${draft.deploymentName}`} embedded draft={draft} onBack={() => setDraft(null)} onDeploymentStarted={() => onNavigate('optimization-deployments')} />
+            <Workspace key={`${mode}:${draft.clusterId}:${draft.model}:${draft.deploymentName}`} embedded draft={draft} onBack={() => setDraft(null)} onDeploymentStarted={run => onNavigate('optimization-deployments', { clusterId: draft.clusterId, deploymentSearch: run?.deployment_execution_id || run?.deployment_run_id || draft.deploymentName })} />
         </> : <form onSubmit={begin} className="space-y-5">
             <Panel title="Deployment target" actions={<Badge tone="neutral">{selected.family}</Badge>}>
                 <h2 className="mb-4 text-lg font-semibold">{selected.name}</h2>

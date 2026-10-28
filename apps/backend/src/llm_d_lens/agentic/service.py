@@ -126,6 +126,9 @@ class AgenticDeploymentService:
             if not 1 <= request.planning_facts.max_candidates <= 10:
                 raise ValueError("Candidate limit must be between 1 and 10.")
             requirements = request.requirements
+            selected_provider = requirements.hard_constraints.get("providerRef")
+            if selected_provider is not None and selected_provider not in PROVIDER_MECHANISMS:
+                raise ValueError("Unsupported planning provider: " + selected_provider)
             known_mechanisms = set().union(*PROVIDER_MECHANISMS.values())
             unknown_mechanisms = (set(requirements.required_features) | set(requirements.forbidden_features)) - known_mechanisms
             if unknown_mechanisms:
@@ -134,7 +137,7 @@ class AgenticDeploymentService:
             if workload.get("concurrency") is not None and workload.get("requestRate") is not None:
                 raise ValueError("Choose concurrency or request rate, not both.")
             request = request.model_copy(update={
-                "planner_prompt": f"{requirements.objective} priority.",
+                "planner_prompt": request.planner_prompt or f"{requirements.objective} priority.",
                 "planning_facts": replace(
                     request.planning_facts,
                     hardware_capacity_mode="free",
@@ -143,12 +146,13 @@ class AgenticDeploymentService:
                     required_cpu_buffer_gib=0,
                     ttft_slo_ms=requirements.performance_targets.get("ttftMs"),
                     tpot_slo_ms=requirements.performance_targets.get("tpotMs"),
+                    end_to_end_latency_slo_ms=requirements.performance_targets.get("e2eMs"),
                     use_case="long-inputs" if workload.get("prefillHeavy") is True else "general-chat",
                     shared_prefix_ratio=1 if workload.get("prefixReuse") is True else 0,
                     prefill_heavy=workload.get("prefillHeavy") is True,
                     workload_profile=WorkloadProfile(
                         mean_input_tokens=workload.get("inputTokens"),
-                        p95_input_tokens=workload.get("inputTokens"),
+                        p95_input_tokens=workload.get("p95InputTokens"),
                         mean_output_tokens=workload.get("outputTokens"),
                         concurrency=workload.get("concurrency"),
                         request_rate=workload.get("requestRate"),

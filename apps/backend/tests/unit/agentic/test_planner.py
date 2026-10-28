@@ -1777,3 +1777,14 @@ def test_from_provider_id_returns_none_when_the_provider_no_longer_exists(monkey
     monkeypatch.setattr(ai_providers_service, "default_service", lambda: svc)
 
     assert OpenAICompatiblePlanner.from_provider_id("missing-provider") is None
+
+
+def test_ttft_prediction_cannot_establish_an_unmeasured_end_to_end_slo():
+    facts = PlanningFacts(
+        model_weight_gib=8, vram_per_gpu_gib=32, free_gpu_count=4,
+        ttft_slo_ms=100, end_to_end_latency_slo_ms=2000,
+        aic_predictions=(AICCandidatePrediction(mode="agg", tensor_parallel_size=1, replicas=1, ttft_ms=20),),
+    )
+    planner = DeterministicPlanner()
+    candidate = next(item for item in planner.candidates(facts) if item.id == "optimized-baseline-tp1-r1")
+    assert planner._slo_assessment(facts, candidate) == ("unknown", 0)

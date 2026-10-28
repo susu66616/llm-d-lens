@@ -12,6 +12,49 @@ entry is replaced by the profile handler's built-in header handling; the saved
 prefill/decode decision is preserved. A conflicting old and new decider setting
 must be corrected before deployment.
 
+
+## Configure and review Manual or Agentic plans
+
+Manual includes a **Deployment method** selector: automatic selection, aggregated
+serving, Prefill / Decode separation, prefix-aware routing or tiered prefix cache.
+An explicit selection is a hard constraint. Incompatible workload or insufficient
+resources produce an explanation instead of silently switching methods. After
+planning, edit role replicas, tensor parallelism and runtime settings in the
+component inspector, then regenerate resources for the new revision.
+
+Agentic provides **Deployment preference** for optional AI guidance alongside the
+structured workload, mechanism and resource limits. Built-in rules use the
+structured fields. **Mean input tokens** and **P95 input tokens** are separate;
+leaving P95 empty preserves an unknown percentile. Optional latency targets include
+P95 TTFT, TPOT and end-to-end latency, in milliseconds. An end-to-end target
+remains unverified until measured; TTFT/TPOT predictions cannot establish it.
+
+Use **Candidate comparison** to inspect topology, accelerator count, predictions,
+historical measurements, excluded candidates and planning evidence. **Review and
+confirm** contains the shared topology workbench and final approval. The workbench
+has **Overview**, **Configuration basis**, **Validation**, **YAML** after rendering,
+and optional **3D explorer** views. The 2D graph supports search, zoom and selecting
+relationships; its arrows describe configuration relationships, not measured traffic.
+The Validation view separates completed resource checks from pending admission,
+readiness and performance checks.
+
+When trial deployments are enabled, **Real benchmark tests** is a separate view.
+Its accelerator ceiling starts from the planning constraint or discovered capacity;
+unknown capacity requires an explicit value. Saved tests restore their recorded
+workload and budget. The form checks required repetitions, resource ceilings and
+numeric limits before submission. Interrupted or failed cleanup must be resolved
+before starting more tests; submitted deployments cannot start another trial.
+Trial evidence displays measured TTFT, TPOT, end-to-end latency, throughput and
+error fraction, with missing values left unknown.
+
+**Change requirements** keeps the current plan available until a replacement is
+created; **Keep existing plan** returns to it. A new configuration revision requires
+new review. After explicit approval, **Deployment execution** shows the actual Deploy
+run and component states, attempts and failures. Open **View Pods & Logs** when an
+execution record is available, or **Observe deployment** to open the filtered
+Deployments list for monitoring and further evaluation.
+
+
 ## Hardware profiles and guide variants
 
 Deployment rendering resolves hardware through the profile registry. The selected
@@ -315,8 +358,9 @@ Open **Verify with real benchmarks**, select candidates, set the GPU ceiling,
 maximum minutes, benchmark-run budget and repetitions, then choose throughput,
 P95 end-to-end latency or throughput per GPU as the objective. The optional CPU
 cache budget adds a composed trial variant for each compatible base; include
-those extra repetitions in the benchmark-run budget. The default synthetic load
-uses 512 input tokens, 128 output tokens, concurrency 4 and 100 requests. Expand
+those extra repetitions in the benchmark-run budget. Synthetic load starts from the plan's mean input/output lengths and concurrency;
+missing values default to 512 input tokens, 128 output tokens and concurrency 4,
+with 100 requests. A restored test uses its recorded workload. Expand
 **Test workload** to change these values or supply representative inference-perf
 YAML, such as a shared-prefix workload for cache experiments.
 

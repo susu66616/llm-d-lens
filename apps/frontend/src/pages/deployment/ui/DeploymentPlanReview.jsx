@@ -77,7 +77,7 @@ export function DeploymentPlanReview({ content = '', candidate, model, mode = 'm
             ? 'The topology and YAML show the same generated resources, not live cluster inventory. Planned placement is not actual placement.'
             : 'Candidate topology before YAML generation. Resource relationships appear after rendering; performance remains unverified.'}</p>
         <div className="mb-4 flex flex-wrap gap-2" role="group" aria-label="Configuration view">
-            {[['2d', 'Overview'], ['3d', '3D explorer'], ['reason', 'Configuration basis'], ...(content ? [['yaml', 'YAML']] : [])].map(([id, label]) => <Button key={id} size="sm" variant={view === id ? 'primary' : 'secondary'} aria-pressed={view === id} onClick={() => setView(id)}>{label}</Button>)}
+            {[['2d', 'Overview'], ['reason', 'Configuration basis'], ['validation', 'Validation'], ...(content ? [['yaml', 'YAML']] : []), ['3d', '3D explorer']].map(([id, label]) => <Button key={id} size="sm" variant={view === id ? 'primary' : 'secondary'} aria-pressed={view === id} onClick={() => setView(id)}>{label}</Button>)}
             {content && <Button size="sm" variant="ghost" className="ml-auto" onClick={() => downloadBlob(new Blob([content], { type: 'application/yaml' }), `deployment-v${revision}.yaml`)}><Download size={14} />Download YAML</Button>}
         </div>
         {parsed.error && <p role="alert">Unable to display resources: {parsed.error}. Do not use the graph as a configuration reference.</p>}
@@ -89,7 +89,13 @@ export function DeploymentPlanReview({ content = '', candidate, model, mode = 'm
             </tr>)}</tbody></table></div> : <p className="text-sm text-theme-muted">No mechanism evidence was recorded for this configuration.</p>}
             <p className="text-xs text-theme-muted">Validation: {validation?.status || 'Not supplied'}. Generated YAML alone is not a passed check.</p>
         </div>}
-        {view === 'reason' ? null : view === 'yaml' ? <pre tabIndex={0} aria-label="Generated YAML" className="max-h-[36rem] overflow-auto rounded-lg border border-theme-border bg-theme-bg p-5 text-xs leading-relaxed">{content}</pre> : <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
+        {view === 'validation' && <section aria-label="Configuration validation" className="space-y-4">
+            <Badge tone={validation?.status === 'resources_checked' ? 'success' : 'warning'}>{validation?.status || 'Not checked'}</Badge>
+            <div className="grid gap-4 md:grid-cols-2"><div><h3 className="font-semibold">Completed checks</h3>{validation?.checks?.length ? <ul className="mt-3 list-inside list-disc space-y-2 text-sm">{validation.checks.map(check => <li key={check}>{check}</li>)}</ul> : <p className="mt-3 text-sm text-theme-muted">No completed checks recorded.</p>}</div><div><h3 className="font-semibold">Pending verification</h3><ul className="mt-3 list-inside list-disc space-y-2 text-sm">{(validation?.pending || ['Render resources', 'Cluster admission', 'Runtime readiness', 'Workload performance']).map(check => <li key={check}>{check}</li>)}</ul></div></div>
+            {validation?.warnings?.map(warning => <p key={warning} className="text-sm">{warning}</p>)}
+            <p className="text-xs text-theme-muted">These checks apply to revision {revision}. Editing creates a new revision and requires new resource checks and approval. A resource check does not establish measured SLO compliance.</p>
+        </section>}
+        {view === 'reason' || view === 'validation' ? null : view === 'yaml' ? <pre tabIndex={0} aria-label="Generated YAML" className="max-h-[36rem] overflow-auto rounded-lg border border-theme-border bg-theme-bg p-5 text-xs leading-relaxed">{content}</pre> : <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
             <div className="min-w-0">{view === '3d' ? <Suspense fallback={<LoadingState label="Loading 3D explorer" />}><Scene plan={plan} selected={selectedId} onSelect={select} /></Suspense> : <DeploymentPlanGraph plan={plan} selected={selectedId} onSelect={select} />}</div>
             <aside className="min-w-0 space-y-4 rounded-lg border border-theme-border bg-theme-bg/50 p-4 text-sm">
                 <h3 className="flex items-center gap-2 font-semibold"><Box size={16} />{editing ? 'Edit component' : 'Component inspector'}{editing && <Badge tone="warning" size="xs">Unsaved</Badge>}</h3>

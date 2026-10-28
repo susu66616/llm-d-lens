@@ -38,14 +38,14 @@ test('both modes provide a short form with explicit defaults and collapsed optio
         const html = renderToStaticMarkup(createElement(DeploymentRequirementsForm, { mode }));
         assert.match(html, /General chat \(recommended\)/);
         assert.match(html, /Do not assume shared content/);
-        assert.match(html, /Input tokens per request<input[^>]*value="1024"/);
-        assert.match(html, /Output tokens per request<input[^>]*value="256"/);
+        assert.match(html, /Mean input tokens per request<input[^>]*value="1024"/);
+        assert.match(html, /Mean output tokens per request<input[^>]*value="256"/);
         assert.match(html, /Concurrent requests<input[^>]*value=""/);
         assert.match(html, /concurrency or request rate, not both/);
         assert.match(html, /<details[^>]*><summary[^>]*>.*Advanced settings/);
         assert.match(html, /No deployment until approval/);
         assert.match(html, /planning assumptions, not observed traffic/);
-        assert.doesNotMatch(html, /<details[^>]* open|Unknown|aria-label="Requirement steps"|>Continue</);
+        assert.doesNotMatch(html, /<details[^>]* open|aria-label="Requirement steps"|>Continue</);
         assert.doesNotMatch(html, /Tensor parallel|gpu-memory-utilization/);
     }
 });

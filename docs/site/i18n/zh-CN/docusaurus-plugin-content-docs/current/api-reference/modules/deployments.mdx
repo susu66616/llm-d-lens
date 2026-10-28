@@ -30,6 +30,15 @@ import TabItem from '@theme/TabItem';
 - `requirements`：模型、集群、目标、`hard_constraints.maxAccelerators`、
   负载、性能目标、必须 / 禁止机制 ID 和未知字段。
   当前可控制机制为 `pd_disaggregation`、`prefix_routing` 和 `external_kv_cache`。
+- `requirements.hard_constraints.providerRef`：可选的显式部署方式，支持
+  `optimized-baseline`、`pd-disaggregation`、`precise-prefix-cache-routing` 和
+  `tiered-prefix-cache`。其他方式被拒绝；规划、修订及审批会排除不匹配的候选。
+- `requirements.workload.p95InputTokens`：可选正数，表示输入长度的 P95，
+  与平均值 `inputTokens` 独立；省略时保持未知。
+- `requirements.performance_targets.e2eMs`：可选正整数，表示端到端 P95 延迟目标，
+  单位毫秒，与 `ttftMs` 和 `tpotMs` 并列。测试排名要求每次完整重复均满足所设目标。
+- `planner_prompt`：保留给 AI 辅助规划的可选偏好；结构化约束仍决定校验结果。
+  Manual 不调用外部 AI 提供方。
 - `planning_facts.max_candidates`：共享流程保留候选数量上限，1–10。
   实际空闲资源优先于客户端提交的硬件数据。
 - `execution_policy.max_total_duration_minutes`：规划截止时间，1–180 分钟。
@@ -126,6 +135,10 @@ Manual 浏览器流程最多保留 10 个方案 / 缓存备选，规划后自动
 
 </TabItem>
 <TabItem value="python-api" label="Python API">
+
+`DeploymentRequirements` 接受 REST 契约中相同的可选字典字段 `providerRef`、
+`p95InputTokens` 和 `e2eMs`。`create` 保留独立百分位，将端到端目标归一到规划事实，
+并在排名前按显式部署方式过滤候选。
 
 `AgenticDeploymentService.create` 负责共享决策规划；
 `revise_candidate` 重新校验修改并保留原方案。

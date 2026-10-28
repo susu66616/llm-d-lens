@@ -154,3 +154,13 @@ async def test_pd_cache_variant_participates_in_measured_search(monkeypatch):
     assert len(run.optimization['samples']) == 4
     assert {s['candidate_id'] for s in run.optimization['samples']} == {'a', 'a-cpu-4'}
     assert cleanup.await_count == 2
+
+
+def test_end_to_end_target_requires_every_measured_repetition():
+    facts = PlanningFacts(1, 8, 4, end_to_end_latency_slo_ms=2000)
+    rows = [sample('a', 100, e2e_p95_ms=1000), sample('a', 120)]
+    assert rank_measurements(rows, request(), facts) == []
+    rows[1]['metrics']['e2e_p95_ms'] = 2001
+    assert rank_measurements(rows, request(), facts) == []
+    rows[1]['metrics']['e2e_p95_ms'] = 1500
+    assert rank_measurements(rows, request(), facts)[0]['candidate_id'] == 'a'

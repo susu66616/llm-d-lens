@@ -21,9 +21,25 @@ test('agentic review labels candidate evidence before rendering', () => {
 test('measured optimization exposes resource budgets and an explicit deployment action', async () => {
     const { MeasuredOptimizationControls } = await import('./MeasuredOptimizationControls.jsx');
     const html = renderToStaticMarkup(<MeasuredOptimizationControls run={{ id: 'plan', status: 'awaiting_approval', candidates: [] }} onUpdate={() => {}} onReview={() => {}} />);
-    assert.match(html, /Maximum GPUs/);
+    assert.match(html, /Maximum accelerators/);
     assert.match(html, /Maximum minutes/);
     assert.match(html, /Repetitions per candidate/);
     assert.match(html, /Start deployment and benchmark tests/);
     assert.match(html, /best tested candidate/);
+});
+
+
+test('trial settings restore recorded workload and prevent restarting deployed or unclean plans', async () => {
+    const { MeasuredOptimizationControls } = await import('./MeasuredOptimizationControls.jsx');
+    for (const [status, optimizationStatus] of [['deploying', 'completed'], ['awaiting_approval', 'cleanup_failed']]) {
+        const run = { id: 'plan', status, candidates: [], optimization: { status: optimizationStatus, request: {
+            candidate_ids: ['candidate-a'], max_gpu_count: 3, repetitions: 2,
+            benchmark: { matrix: [{ isl: 1024, osl: 64 }], concurrency_stages: [{ concurrency: 8, num_requests: 200 }] },
+        } } };
+        const html = renderToStaticMarkup(<MeasuredOptimizationControls run={run} />);
+        assert.match(html, /<fieldset disabled=""/);
+        assert.match(html, /Input tokens<input[^>]*value="1024"/);
+        assert.match(html, /Concurrent requests<input[^>]*value="8"/);
+        if (optimizationStatus === 'cleanup_failed') assert.match(html, /Clean up interrupted tests/);
+    }
 });
