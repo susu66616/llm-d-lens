@@ -72,3 +72,33 @@ def test_router_values_require_a_saved_deployment_bundle():
 def test_unknown_or_invalid_guide_settings_are_rejected(settings):
     with pytest.raises(ValueError):
         validate_guide_settings({"guideSettings": settings}, manifest(), "optimized-baseline")
+
+
+def test_typed_router_settings_target_cpu_producer_and_reject_yaml_conflicts():
+    from llm_d_lens.configuration.guide_settings import apply_router_settings
+
+    plugins = {
+        "plugins": [
+            {"type": "approx-prefix-cache-producer", "name": "gpu-prefix-cache-producer"},
+            {"type": "approx-prefix-cache-producer", "name": "cpu-prefix-cache-producer"},
+        ]
+    }
+    values = {
+        "router": {
+            "epp": {
+                "pluginsConfigFile": "plugins.yaml",
+                "pluginsCustomConfig": {"plugins.yaml": yaml.safe_dump(plugins)},
+            }
+        }
+    }
+    apply_router_settings(values, {"cacheLruCapacity": 123})
+    rendered = yaml.safe_load(values["router"]["epp"]["pluginsCustomConfig"]["plugins.yaml"])["plugins"]
+    assert "parameters" not in rendered[0]
+    assert rendered[1]["parameters"] == {"lruCapacityPerServer": 123}
+    with pytest.raises(ValueError, match="conflict"):
+        apply_router_settings(values, {"cacheLruCapacity": 10, "routerValues": yaml.safe_dump(values)})
+
+
+def test_cpu_index_capacity_requires_saved_router_inputs():
+    with pytest.raises(ValueError, match="bundle"):
+        validate_guide_settings({"guideSettings": {"cacheLruCapacity": 123}}, manifest(), "tiered-prefix-cache")

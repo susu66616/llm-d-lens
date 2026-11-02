@@ -1276,3 +1276,39 @@ asyncio.run(main())
 </Tabs>
 
 完整的请求/响应 schema 请参见 FastAPI 的 OpenAPI schema（使用 `npm run docs:api` 重新生成）。
+
+
+### 部署扫描请求
+
+`POST /api/v1/evaluate/evaluations` 接受可选的 `sweep` 对象，包含
+`strategy`（`auto`、`grid`、`specified`）、`dimensions`、`resource_mode`、
+`accelerator_budget`、`max_trials`、`max_duration_seconds`、`objective` 和 `seed`。
+每个维度提供 `minimum`、`maximum` 和可选 `step`，或显式 `values`。
+指定候选模式还需要 `specified_candidates`。必须仅提供一个基础 `benchmark_plans` 条目，
+并关闭 `preserve_deployment`。
+
+设置 `preview_only: true` 可校验和预览扫描，不保存或启动评测。
+响应包含 `preview_only: true`、`sweep.candidates` 和 `sweep.excluded`。
+正常 workflow 响应通过 `sweep` 保留候选制品、实测评分和 `best_candidate_id` 等搜索状态。
+不含 `sweep` 的现有请求保持原有行为。
+
+附加控制包括 `confirmation_trials`（自动策略，计入 `max_trials`）、按场景 ID 指定的正数
+`scenario_weights` 和可选 `patience`。高级维度名称使用 `argument:TARGET:NAME`、
+`environment:TARGET:NAME`（`TARGET` 为 `both`、`prefill` 或 `decode`），或
+`guide:cacheCpuGiB`、`guide:rdmaNicCount`、`guide:routerValues`。
+分类参数使用显式 `values`。已有专用运行参数必须使用对应维度名称。
+扫描时关闭独立 baseline 对比（`include_baseline: false`）。
+
+`POST /api/v1/evaluate/workflow-runs/{workflow_id}/pause` 请求在当前候选清理后暂停；
+`POST /api/v1/evaluate/workflow-runs/{workflow_id}/resume` 恢复已暂停的搜索。
+两者分别沿用取消和重试权限，并校验 workflow 资源访问范围。
+
+### Guide 部署参数
+
+以下配置仅适用于 Evaluation 现有的 Optimized baseline、P/D disaggregation、Tiered prefix cache 和 Precise prefix cache routing，不增加实验类型。
+
+- P/D：`guideSettings.slices` 复制完整的 `DisaggregatedSet` 拓扑，角色副本数按每个 slice 计算。搜索支持 `guide:slices`；没有覆盖值时保留已保存清单的 slice 数量。
+- 分层缓存：原生 vLLM 的 `cacheCpuGiB` 按 Pod 计算，LMCache 按 TP rank 计算。增加容量会保留内存余量并增大内存请求、限制及已有内存型共享内存卷。`cacheLruCapacity` 设置每个服务器的 CPU 索引块数，其值取决于模型和 connector。`cacheStorageGiB` 与可选的 `cacheStorageClass` 配置 filesystem Guide 已有的共享缓存 PVC。存储类必须支持 ReadWriteMany，数据保留遵循其回收策略。
+- Optimized baseline 和 Precise routing 保留所选 Guide 的路由配置，Precise routing 沿用已有自动校准。高级覆盖继续使用 Router YAML 输入；覆盖 CPU 插件文档时不能同时设置 `cacheLruCapacity`。
+
+搜索中修改 `guide:cacheLruCapacity` 会重新生成 Router 部署包。部署保留清单中显式的 KV 传输失败策略，未设置时仍默认使用 `recompute`。本地测试不等同于真实集群部署和压测成功。

@@ -2558,3 +2558,7 @@ bindings belonging to another model. Generic binding creation rejects retired
 `deployment_run` and `deployment_execution` resource types.
   </TabItem>
 </Tabs>
+
+### Guide settings for Evaluation deployment
+
+`/api/guide-planning/plan` accepts `guideSettings.slices` for P/D and `cacheLruCapacity`, `cacheStorageGiB`, and `cacheStorageClass` for tiered caching. Settings are validated against the rendered Guide; the existing Router YAML override remains available.

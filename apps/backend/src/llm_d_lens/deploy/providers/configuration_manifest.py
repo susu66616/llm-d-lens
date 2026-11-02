@@ -181,7 +181,7 @@ def _update_kv_transfer_policy(raw: str) -> tuple[str, str]:
         return raw, "invalid"
     if not isinstance(config, dict):
         return raw, "invalid"
-    if config.get("kv_load_failure_policy") == KV_LOAD_FAILURE_POLICY:
+    if config.get("kv_load_failure_policy") in {"fail", "recompute"}:
         return raw, "unchanged"
     config["kv_load_failure_policy"] = KV_LOAD_FAILURE_POLICY
     return json.dumps(config, separators=(",", ":")), "changed"

@@ -2427,3 +2427,7 @@ def revoke_model_grant(model_id: str, binding_id: str, principal) -> None:
 通用绑定创建方法也会拒绝已退役的 `deployment_run` 和 `deployment_execution` 资源类型。
   </TabItem>
 </Tabs>
+
+### Evaluation 部署的 Guide 参数
+
+`/api/guide-planning/plan` 接受 P/D 的 `guideSettings.slices`，以及分层缓存的 `cacheLruCapacity`、`cacheStorageGiB` 和 `cacheStorageClass`。这些参数会针对渲染后的 Guide 校验，仍可使用已有的 Router YAML 覆盖入口。

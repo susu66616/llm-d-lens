@@ -154,3 +154,41 @@ python -m llm_d_lens.evaluation.benchmark_evidence --run-id <evaluate-run-uuid> 
 
 评估默认清理自己创建的部署。保留部署选项只保留成功候选，不保留独立基线；
 保留的部署会继续占用集群资源。导出文件不包含密钥，也不会打包全部外部数据集和依赖。
+
+
+## 部署参数搜索
+
+选择一个基础配置后，在 Deploy 步骤中启用 **Search parameter ranges**。未选择的参数保持固定。
+为扫描参数设置最小值、最大值和可选采样步长，同时设置加速卡预算、优化目标、配置数量与时间预算。
+TP 范围表示离散搜索空间，不表示区间内每个整数都受支持；每个选中的候选在部署前由 Guide planner 校验。
+
+自动搜索以可复现方式探索采样范围，并在已测优胜配置附近细化，同时保留探索机会。
+完整网格执行所有满足资源约束的采样组合；配置数量预算不足时会拒绝执行。
+固定资源模式只保留卡数完全匹配的组合，最大资源模式也保留使用更少卡的配置。PD 资源计算包含两侧。
+
+预览展示满足资源约束的候选和排除项，不创建部署。每个候选重新渲染为独立配置制品，
+使用相同场景评测，并在下一组开始前清理。单组失败不会阻止其他候选；清理未确认完成时停止搜索。
+时间预算限制测试执行，但资源复用前仍需完成清理。
+
+结果区分未测试、失败和成功候选。缺少目标指标或未达到 SLO 的候选不参与排名。
+Goodput 不会以原始吞吐代替。推荐结果仅代表已测试候选中的最佳配置，不保证全局最优。
+
+自动搜索在配置数量预算内预留重复确认测试。成功的重复测量参与均值和范围计算；确认失败的候选
+不会被推荐。高级参数入口支持运行参数、环境变量和已有 Guide 设置，由现有 runtime 与 Guide
+配置契约校验，不假定不同 runtime 具有相同能力。改变精度或量化时，性能测量不代表质量验证。
+
+**Pause after current configuration** 会在当前测量和清理完成后暂停。
+**Resume search** 保留已有测量和剩余预算。
+**Deploy best measured configuration** 使用获胜配置制品启动独立部署，需要创建部署的权限。
+
+### Guide 部署参数
+
+以下配置仅适用于 Evaluation 现有的 Optimized baseline、P/D disaggregation、Tiered prefix cache 和 Precise prefix cache routing，不增加实验类型。
+
+- P/D：`guideSettings.slices` 复制完整的 `DisaggregatedSet` 拓扑，角色副本数按每个 slice 计算。搜索支持 `guide:slices`；没有覆盖值时保留已保存清单的 slice 数量。
+- 分层缓存：原生 vLLM 的 `cacheCpuGiB` 按 Pod 计算，LMCache 按 TP rank 计算。增加容量会保留内存余量并增大内存请求、限制及已有内存型共享内存卷。`cacheLruCapacity` 设置每个服务器的 CPU 索引块数，其值取决于模型和 connector。`cacheStorageGiB` 与可选的 `cacheStorageClass` 配置 filesystem Guide 已有的共享缓存 PVC。存储类必须支持 ReadWriteMany，数据保留遵循其回收策略。
+- Optimized baseline 和 Precise routing 保留所选 Guide 的路由配置，Precise routing 沿用已有自动校准。高级覆盖继续使用 Router YAML 输入；覆盖 CPU 插件文档时不能同时设置 `cacheLruCapacity`。
+
+搜索中修改 `guide:cacheLruCapacity` 会重新生成 Router 部署包。部署保留清单中显式的 KV 传输失败策略，未设置时仍默认使用 `recompute`。本地测试不等同于真实集群部署和压测成功。
+
+新建 Evaluation 时，配置编辑器只生成一个基础配置，首次保存后在 Deploy 步骤启用参数范围搜索。初始副本范围与基础配置一致，可调整所选参数的最小值、最大值和步长，自动生成候选，不必逐个添加。缓存和 NIC 参数按 Guide 直接显示，实际支持情况在规划时校验。无法确定的继承值保持空白，需填写范围。已有保存配置的对比方式仍可使用。

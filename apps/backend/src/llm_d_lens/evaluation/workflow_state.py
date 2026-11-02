@@ -11,6 +11,7 @@ class LifecycleError(ValueError):
 
 
 class WorkflowStatus(StrEnum):
+    PAUSED = "paused"
     QUEUED = "queued"
     DEPLOYING = "deploying"
     RUNNING = "running"
@@ -40,6 +41,7 @@ class BenchmarkStatus(StrEnum):
 
 
 WORKFLOW_TRANSITIONS: Mapping[WorkflowStatus, frozenset[WorkflowStatus]] = {
+    WorkflowStatus.PAUSED: frozenset({WorkflowStatus.QUEUED, WorkflowStatus.CANCELLED}),
     WorkflowStatus.QUEUED: frozenset(
         {WorkflowStatus.DEPLOYING, WorkflowStatus.RUNNING, WorkflowStatus.CANCELLING, WorkflowStatus.FAILED}
     ),
@@ -47,10 +49,22 @@ WORKFLOW_TRANSITIONS: Mapping[WorkflowStatus, frozenset[WorkflowStatus]] = {
         {WorkflowStatus.BENCHMARKING, WorkflowStatus.CANCELLING, WorkflowStatus.FAILED}
     ),
     WorkflowStatus.RUNNING: frozenset(
-        {WorkflowStatus.SUCCEEDED, WorkflowStatus.CANCELLING, WorkflowStatus.CANCELLED, WorkflowStatus.FAILED}
+        {
+            WorkflowStatus.PAUSED,
+            WorkflowStatus.SUCCEEDED,
+            WorkflowStatus.CANCELLING,
+            WorkflowStatus.CANCELLED,
+            WorkflowStatus.FAILED,
+        }
     ),
     WorkflowStatus.BENCHMARKING: frozenset(
-        {WorkflowStatus.SUCCEEDED, WorkflowStatus.CANCELLING, WorkflowStatus.CANCELLED, WorkflowStatus.FAILED}
+        {
+            WorkflowStatus.PAUSED,
+            WorkflowStatus.SUCCEEDED,
+            WorkflowStatus.CANCELLING,
+            WorkflowStatus.CANCELLED,
+            WorkflowStatus.FAILED,
+        }
     ),
     WorkflowStatus.CANCELLING: frozenset({WorkflowStatus.CANCELLED, WorkflowStatus.FAILED}),
     WorkflowStatus.SUCCEEDED: frozenset(),

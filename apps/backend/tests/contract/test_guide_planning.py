@@ -609,3 +609,95 @@ def test_precise_render_url_still_needs_a_render_pool():
         }
     }
     assert guide_bundle._needs_render_service(values) is True
+
+
+def test_requested_slices_multiply_roles_and_are_recorded():
+    plan = guide.plan_documents(
+        [disaggregated_set()],
+        "example/model",
+        {},
+        None,
+        {
+            "guide": "pd-disaggregation",
+            "guideSettings": {"slices": 3},
+            "prefillReplicas": 2,
+            "decodeReplicas": 1,
+        },
+    )
+    assert plan["documents"][0]["spec"]["slices"] == 3
+    assert plan["summary"]["plannedReplicasByRole"] == {"prefill": 6, "decode": 3}
+    assert any(patch["path"].endswith("/slices") for patch in plan["planningPatch"])
+
+
+def test_slices_require_disaggregated_set():
+    plan = guide.plan_documents(
+        [deployment()],
+        "example/model",
+        {},
+        None,
+        {
+            "guide": "pd-disaggregation",
+            "guideSettings": {"slices": 2},
+        },
+    )
+    assert "Slices require a DisaggregatedSet Guide." in plan["validation"]["errors"]
+
+
+def test_cpu_cache_memory_preserves_headroom_and_grows_shared_memory():
+    container = {
+        "args": [
+            '--kv-transfer-config={"kv_connector":"OffloadingConnector","kv_connector_extra_config":{"cpu_bytes_to_use":1073741824}}'
+        ],
+        "resources": {"requests": {"memory": "3Gi"}, "limits": {"memory": "4Gi"}},
+        "volumeMounts": [{"name": "shm", "mountPath": "/dev/shm"}],
+    }
+    pod = {"volumes": [{"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": "1Gi"}}]}
+    runtime.configure_cache_memory(container, pod, 4)
+    assert container["resources"]["requests"]["memory"] == "6144Mi"
+    assert container["resources"]["limits"]["memory"] == "7168Mi"
+    assert pod["volumes"][0]["emptyDir"]["sizeLimit"] == "4096Mi"
+
+
+def test_filesystem_cache_pvc_is_bound_to_the_guide_mount():
+    document = deployment()
+    pod = document["spec"]["template"]["spec"]
+    pod["containers"][0]["volumeMounts"] = [{"name": "cache", "mountPath": "/mnt/files-storage"}]
+    pod["volumes"] = [{"name": "cache", "persistentVolumeClaim": {"claimName": "guide-cache"}}]
+    plan = guide.plan_documents(
+        [document],
+        "example/model",
+        {},
+        None,
+        {
+            "guide": "tiered-prefix-cache",
+            "guideSettings": {"cacheStorageGiB": 100, "cacheStorageClass": "shared-rwx"},
+        },
+    )
+    claim = next(doc for doc in plan["documents"] if doc["kind"] == "PersistentVolumeClaim")
+    assert claim["metadata"]["name"] == "guide-cache"
+    assert claim["spec"] == {
+        "accessModes": ["ReadWriteMany"],
+        "storageClassName": "shared-rwx",
+        "resources": {"requests": {"storage": "100Gi"}},
+    }
+    from llm_d_lens.configuration.guide_settings import validate_guide_settings
+
+    validate_guide_settings(
+        {"guideSettings": {"cacheStorageGiB": 100, "cacheStorageClass": "shared-rwx"}},
+        yaml.safe_dump_all(plan["documents"]),
+        "tiered-prefix-cache",
+    )
+
+
+def test_filesystem_cache_settings_reject_a_cpu_only_guide():
+    plan = guide.plan_documents(
+        [deployment()],
+        "example/model",
+        {},
+        None,
+        {
+            "guide": "tiered-prefix-cache",
+            "guideSettings": {"cacheStorageGiB": 100},
+        },
+    )
+    assert any("shared PVC" in error for error in plan["validation"]["errors"])

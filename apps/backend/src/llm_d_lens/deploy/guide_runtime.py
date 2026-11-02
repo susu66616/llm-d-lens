@@ -243,6 +243,37 @@ def configure_model_server(container: dict, model: str, tp: int, identity: str, 
     apply_runtime_overrides(container, overrides)
 
 
+def configure_cache_memory(container: dict, pod: dict, gib: float):
+    """Preserve existing non-cache memory headroom when resizing a CPU cache."""
+    from kubernetes.utils.quantity import parse_quantity
+
+    connector = json.loads(runtime_argument(container, "kv-transfer-config") or "{}")
+    if connector.get("kv_connector") == "OffloadingConnector":
+        previous = int(connector.get("kv_connector_extra_config", {}).get("cpu_bytes_to_use") or 0)
+        required = math.ceil(gib * 1024**3)
+    elif str(connector.get("kv_connector", "")).startswith("LMCacheConnector"):
+        environment = {item.get("name"): item.get("value") for item in container.get("env", [])}
+        ranks = int(runtime_argument(container, "tensor-parallel-size") or 1)
+        previous = math.ceil(float(environment.get("LMCACHE_MAX_LOCAL_CPU_SIZE") or 0) * ranks * 1024**3)
+        required = math.ceil(gib * ranks * 1024**3)
+    else:
+        raise ValueError("This connector does not declare CPU cache capacity units")
+    for kind in ("requests", "limits"):
+        resources = container.setdefault("resources", {}).setdefault(kind, {})
+        old = int(parse_quantity(resources.get("memory") or "0"))
+        resources["memory"] = f"{math.ceil(max(required, old + max(0, required - previous)) / 1024**2)}Mi"
+    # This is a Kubernetes mount target, not a local temporary file.
+    from .providers.shared_memory import SHM_PATH
+
+    mounts = {item.get("name") for item in container.get("volumeMounts", []) if item.get("mountPath") == SHM_PATH}
+    for volume in pod.get("volumes", []):
+        if volume.get("name") in mounts and volume.get("emptyDir", {}).get("medium") == "Memory":
+            cache = volume["emptyDir"]
+            cache["sizeLimit"] = (
+                f"{math.ceil(max(required, int(parse_quantity(cache.get('sizeLimit') or '0'))) / 1024**2)}Mi"
+            )
+
+
 def configure_cpu_cache(container: dict, gib: float):
     connector = json.loads(runtime_argument(container, "kv-transfer-config") or "{}")
     if connector.get("kv_connector") == "OffloadingConnector":

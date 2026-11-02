@@ -7,6 +7,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from .sweep_models import SweepDefinition
+
 
 def validate_inline_workload(content: str) -> dict:
     """Reject incomplete inline workloads before provisioning benchmark resources."""
@@ -258,6 +260,8 @@ class BenchmarkPlan(BaseModel):
 
 
 class EvaluationCreateRequest(BaseModel):
+    sweep: SweepDefinition | None = None
+    preview_only: bool = False
     name: str = Field(default="Evaluation", min_length=1, max_length=200)
     cluster_session_id: str = Field(min_length=36, max_length=36)
     runtime: RuntimeSpec = Field(default_factory=RuntimeSpec)
@@ -273,6 +277,14 @@ class EvaluationCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def unique_workload_ids(self) -> EvaluationCreateRequest:
+        if self.sweep is not None and len(self.benchmark_plans) != 1:
+            raise ValueError("Sweep requires exactly one base configuration plan")
+        if self.sweep is not None and (
+            not self.benchmark_plans[0].include_configuration or self.benchmark_plans[0].include_baseline
+        ):
+            raise ValueError("Sweep evaluates the base configuration; disable independent baseline comparisons")
+        if self.sweep is not None and self.benchmark_plans[0].preserve_deployment:
+            raise ValueError("Sweep must release intermediate deployments")
         ids = [plan.id for plan in self.benchmark_plans]
         if len(ids) != len(set(ids)):
             raise ValueError("benchmark plan ids must be unique")

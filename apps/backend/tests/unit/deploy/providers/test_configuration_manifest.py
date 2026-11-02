@@ -1202,7 +1202,7 @@ async def test_render_applies_graceful_shutdown_to_delegate_manifest(monkeypatch
         assert source.read_text(encoding="utf-8") == manifest
 
 
-def test_graceful_shutdown_sets_kv_load_failure_policy_in_structured_args():
+def test_graceful_shutdown_preserves_explicit_kv_load_failure_policy():
     transfer = {
         "kv_connector": "NixlConnector",
         "kv_role": "kv_both",
@@ -1224,12 +1224,12 @@ def test_graceful_shutdown_sets_kv_load_failure_policy_in_structured_args():
     container = yaml.safe_load(rendered)["spec"]["template"]["spec"]["containers"][0]
     index = container["args"].index("--kv-transfer-config")
     updated = json.loads(container["args"][index + 1])
-    assert updated["kv_load_failure_policy"] == "recompute"
+    assert updated["kv_load_failure_policy"] == "fail"
     assert updated["kv_connector"] == "NixlConnector"
     assert updated["kv_role"] == "kv_both"
     assert updated["kv_connector_extra_config"] == {"backends": ["UCX"]}
     assert report["kvTransferConfigsDetected"] == 1
-    assert report["kvTransferConfigsUpdated"] == 1
+    assert report["kvTransferConfigsUpdated"] == 0
     assert report["warnings"] == []
 
 

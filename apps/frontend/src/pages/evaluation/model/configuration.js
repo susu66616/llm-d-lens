@@ -27,7 +27,7 @@ export function configurationCustomRows(content = {}) {
         .map(item => ({ ...item, value: String(item.value) }));
 }
 
-export function expandConfigurationTopologies({ guide, replicaVariants, tensorParallelVariants, prefillReplicaVariants, prefillTensorParallelVariants, pdTopologyVariants = '' }) {
+export function expandConfigurationTopologies({ guide, replicaVariants, tensorParallelVariants, prefillReplicaVariants, prefillTensorParallelVariants, pdTopologyVariants = '', guideSettings = {} }) {
     const parse = (value, label) => {
         const parts = String(value).split(',').map(item => item.trim());
         const values = parts.map(Number);
@@ -53,7 +53,7 @@ export function expandConfigurationTopologies({ guide, replicaVariants, tensorPa
     if (pairs.length * prefillTps.length * tps.length > 16) throw new Error('A configuration sweep is limited to 16 topology combinations.');
     return pairs.flatMap(([prefillReplicaCount, replicaCount]) => prefillTps.flatMap(prefillTpCount => tps.map(tpCount => ({
         prefillReplicaCount, replicaCount, prefillTpCount, tpCount,
-        gpuCount: prefillReplicaCount * prefillTpCount + replicaCount * tpCount,
+        gpuCount: (prefillReplicaCount * prefillTpCount + replicaCount * tpCount) * (isPd ? Number(guideSettings.slices || 1) : 1),
     }))));
 }
 

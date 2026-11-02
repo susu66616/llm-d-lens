@@ -1319,7 +1319,7 @@ def _restore_deployment_links(workflow: dict) -> bool:
     return changed
 
 
-async def _wait_for_deployment(run_id: str) -> tuple[object, object]:
+async def _wait_for_deployment(run_id: str, *, refresh: bool = False) -> tuple[object, object]:
     while True:
         deployment = _store.get_run(run_id)
         if deployment is None:
@@ -1337,6 +1337,8 @@ async def _wait_for_deployment(run_id: str) -> tuple[object, object]:
                 (item.failure.detail for item in deployment.cases if item.failure and item.failure.detail), None
             )
             raise ValueError(detail or f"deployment ended with status {deployment.status.value}")
+        if refresh and not deployment_run_manager.is_run_active(run_id):
+            await deployment_run_manager.worker_for_run(run_id).refresh_run_executions(run_id, pending_only=True)
         await asyncio.sleep(3)
 
 
@@ -1672,7 +1674,11 @@ async def _run_case_benchmark(workflow, case, execution_id, *, use_baseline_endp
         enrich=_enrich_benchmark_result,
         now=_now,
     )
-    if workflow.get("status") == "running" and all(item["status"] == "succeeded" for item in workflow["cases"]):
+    if (
+        not workflow.get("sweep")
+        and workflow.get("status") == "running"
+        and all(item["status"] == "succeeded" for item in workflow["cases"])
+    ):
         workflow.update(
             status="succeeded",
             report=_comparison_report(workflow),
@@ -1761,6 +1767,298 @@ async def _execute_shared_pods_baseline_case(workflow: dict, case: dict) -> None
 @owned_execution("workflow")
 async def _execute_evaluation(workflow_id: str) -> None:
     workflow = _get("workflow", workflow_id)
+    if not workflow or not workflow.get("sweep"):
+        await _execute_evaluation_cases(workflow_id)
+        return
+    from .models import BenchmarkPlan
+    from .sweep import select_candidate
+    from .sweep_execution import materialize_candidate, score_candidate, validate_candidate_workload
+    from .sweep_models import SweepDefinition
+
+    workflow.setdefault("cases", [])
+
+    async def settle_candidate(cases):
+        # A timed-out parent does not automatically cancel its benchmark task.
+        for case in cases:
+            task = _tasks.get(case.get("evaluation_run_id"))
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        # Settle provisioning before cleanup; retain deployment evidence.
+        for run_id in {item.get("deployment_run_id") for item in cases} - {None}:
+            run = _store.get_run(run_id)
+            if run is None:
+                continue
+            needs_cleanup = deployment_run_manager.is_run_active(run_id) or any(
+                item.execution_id
+                and (execution := _store.get_execution(item.execution_id)) is not None
+                and execution.status not in {DeploymentStatus.CLEANED, DeploymentStatus.CLEANED_UP}
+                for item in run.cases
+            )
+            if needs_cleanup:
+                await deployment_run_manager.worker_for_run(run_id).cancel_evaluation_deployment(
+                    run_id, retain_record=True
+                )
+        for case in cases:
+            case.pop("cleanup_error", None)
+
+    state = workflow["sweep"]
+    definition = SweepDefinition.model_validate(state["definition"])
+    workflow.update(status="running", started_at=workflow.get("started_at") or _now())
+    _active_workflows[workflow_id] = workflow
+    _save(workflow)
+    try:
+        elapsed = float(state.get("elapsed_seconds", 0))
+        if state.get("checkpoint_at"):
+            elapsed += max(0, (datetime.now(UTC) - datetime.fromisoformat(state["checkpoint_at"])).total_seconds())
+        clock = asyncio.get_running_loop().time
+        began = clock()
+        if elapsed >= definition.max_duration_seconds:
+            for pending in (item for item in state["candidates"] if item["status"] == "running"):
+                state["cleanup_pending"] = pending["id"]
+                _save(workflow)
+                await settle_candidate(
+                    [case for case in workflow["cases"] if case.get("sweep_candidate_id") == pending["id"]]
+                )
+                pending.update(status="failed", error="Search time budget exhausted during interruption")
+                state.pop("cleanup_pending", None)
+        while elapsed + clock() - began < definition.max_duration_seconds:
+            if state.get("pause_requested"):
+                workflow.update(status="paused", active_case_id=None)
+                return
+            if state.get("cleanup_pending"):
+                interrupted = [
+                    case for case in workflow["cases"] if case.get("sweep_candidate_id") == state["cleanup_pending"]
+                ]
+                await settle_candidate(interrupted)
+                previous = next(item for item in state["candidates"] if item["id"] == state["cleanup_pending"])
+                previous["status"] = (
+                    "succeeded"
+                    if interrupted and all(case["status"] == "succeeded" for case in interrupted)
+                    else "failed"
+                )
+                previous["score"] = score_candidate(
+                    interrupted,
+                    definition.objective,
+                    previous["accelerator_count"],
+                    _sla_evaluation,
+                    definition.scenario_weights,
+                )
+                state.pop("cleanup_pending", None)
+                _save(workflow)
+            candidate = next((item for item in state["candidates"] if item["status"] == "running"), None)
+            candidate = candidate or select_candidate(definition, state["candidates"])
+            if candidate is None:
+                break
+            candidate["status"] = "running"
+            state["elapsed_seconds"] = elapsed + clock() - began
+            state["checkpoint_at"] = _now()
+            state["active_candidate_id"] = candidate["id"]
+            _save(workflow)
+            cases = [item for item in workflow["cases"] if item.get("sweep_candidate_id") == candidate["id"]]
+            if not cases:
+                try:
+                    validate_candidate_workload(candidate["parameters"], state["base_plan"])
+                    remaining = definition.max_duration_seconds - (elapsed + clock() - began)
+                    async with asyncio.timeout(max(0, remaining)):
+                        artifact = await materialize_candidate(
+                            DeployableConfiguration.model_validate(state["base_configuration"]),
+                            candidate,
+                            state["cluster"],
+                            workflow["cluster_session_id"],
+                        )
+                    plan = BenchmarkPlan.model_validate(
+                        {
+                            **state["base_plan"],
+                            "id": f"sweep-{candidate['id']}",
+                            "configuration_artifact_id": artifact.artifact_id,
+                            "preserve_deployment": False,
+                            "include_baseline": False,
+                            "baseline_types": [],
+                        }
+                    )
+                    request = EvaluationCreateRequest(
+                        cluster_session_id=workflow["cluster_session_id"], benchmark_plans=[plan]
+                    )
+                    cases = _evaluation_cases(request, {artifact.artifact_id: artifact})
+                    for case in cases:
+                        case["id"] = f"{candidate['id']}-{case['id']}"
+                        case["sweep_candidate_id"] = candidate["id"]
+                    workflow["cases"].extend(cases)
+                    candidate["configuration_artifact_id"] = artifact.artifact_id
+                    candidate["configuration_checksum"] = artifact.deployable_configuration.checksum
+                    workflow["configuration_artifacts"][artifact.artifact_id] = (
+                        artifact.deployable_configuration.checksum
+                    )
+                except ValueError as error:
+                    candidate.update(status="excluded", error=str(error), failed_stage="planning")
+                    _save(workflow)
+                    continue
+            workflow.update(status="running", finished_at=None)
+            _save(workflow)
+            remaining = definition.max_duration_seconds - (elapsed + clock() - began)
+            try:
+                async with asyncio.timeout(max(0, remaining)):
+                    await _execute_evaluation_cases(workflow_id)
+            except TimeoutError:
+                state["stop_reason"] = "time_budget"
+            workflow = _get("workflow", workflow_id)
+            state = workflow["sweep"]
+            candidate = next(item for item in state["candidates"] if item["id"] == state["active_candidate_id"])
+            cases = [item for item in workflow["cases"] if item.get("sweep_candidate_id") == candidate["id"]]
+            state["cleanup_pending"] = candidate["id"]
+            _save(workflow)
+            await settle_candidate(cases)
+            state.pop("cleanup_pending", None)
+            candidate["status"] = "succeeded" if all(item["status"] == "succeeded" for item in cases) else "failed"
+            candidate["score"] = score_candidate(
+                cases,
+                definition.objective,
+                candidate["accelerator_count"],
+                _sla_evaluation,
+                definition.scenario_weights,
+            )
+            candidate["error"] = next((item.get("error") for item in cases if item.get("error")), None)
+            if candidate["status"] == "succeeded" and candidate["score"] is None:
+                candidate["ranking_reason"] = "Objective metrics are unavailable or a required SLO was not satisfied"
+            if candidate.get("confirmation_of"):
+                original = next(item for item in state["candidates"] if item["id"] == candidate["confirmation_of"])
+                scores = original.setdefault("confirmation_scores", [original["score"]])
+                if candidate.get("score") is not None:
+                    scores.append(candidate["score"])
+                    original["score"] = sum(scores) / len(scores)
+                    original["score_range"] = [min(scores), max(scores)]
+                else:
+                    original["confirmation_failed"] = True
+
+            state["elapsed_seconds"] = elapsed + clock() - began
+            state["checkpoint_at"] = _now()
+            workflow.update(status="running", error=None, finished_at=None)
+            _active_workflows[workflow_id] = workflow
+            _save(workflow)
+            measured = [item for item in state["candidates"] if item.get("score") is not None]
+            if definition.patience and measured:
+                best = max(item["score"] for item in measured)
+                history = state.setdefault("score_history", [])
+                history.append(candidate.get("score"))
+                last_best = max((i for i, value in enumerate(history) if value == best), default=0)
+                if len(history) - last_best - 1 >= definition.patience:
+                    state["stop_reason"] = "no_improvement"
+                    break
+        ranked = sorted(
+            (
+                item
+                for item in state["candidates"]
+                if item.get("score") is not None
+                and not item.get("confirmation_of")
+                and not item.get("confirmation_failed")
+            ),
+            key=lambda item: item["score"],
+            reverse=True,
+        )
+        state.update(
+            active_candidate_id=None,
+            ranking=[item["id"] for item in ranked],
+            best_candidate_id=ranked[0]["id"] if ranked else None,
+            conclusion="Best measured candidate; untested candidates are not ranked",
+        )
+        state["elapsed_seconds"] = elapsed + clock() - began
+        state.setdefault(
+            "stop_reason",
+            "time_budget"
+            if state["elapsed_seconds"] >= definition.max_duration_seconds
+            else "candidate_budget_or_space_exhausted",
+        )
+        workflow.update(
+            status="succeeded" if any(item["status"] == "succeeded" for item in state["candidates"]) else "failed",
+            finished_at=_now(),
+            active_case_id=None,
+            report=_comparison_report(workflow),
+        )
+    except asyncio.CancelledError:
+        workflow = _active_workflows.get(workflow_id) or workflow
+        workflow.update(status="cancelled", finished_at=_now())
+        raise
+    except Exception as error:
+        workflow.update(
+            status="paused" if workflow["sweep"].get("cleanup_pending") else "failed",
+            error=str(error),
+            finished_at=_now(),
+        )
+    finally:
+        state = workflow["sweep"]
+        state["elapsed_seconds"] = elapsed + clock() - began
+        state.pop("checkpoint_at", None)
+        _save(workflow)
+        _workflow_tasks.pop(workflow_id, None)
+        _active_workflows.pop(workflow_id, None)
+
+
+@router.post(
+    "/workflow-runs/{workflow_id}/pause",
+    operation_id="pause_evaluation_sweep",
+    summary="Pause a deployment search after its current candidate.",
+    description=(
+        "Request a sweep pause after the active candidate and resource cleanup finish. Existing results are retained."
+    ),
+    response_model=EvaluationWorkflowResponse,
+)
+@owned_control("workflow")
+async def pause_evaluation_sweep(workflow_id: str, request: Request) -> dict:
+    workflow = _active_workflows.get(workflow_id) or _get("workflow", workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+    _require_evaluate_record(
+        current_principal(request),
+        workflow,
+        permission="evaluate:run:cancel",
+        resource_type="evaluate_workflow",
+        detail="Evaluation access denied",
+    )
+    if not workflow.get("sweep") or workflow["status"] not in {"running", "queued", "deploying", "benchmarking"}:
+        raise HTTPException(status_code=409, detail="Only an active sweep can be paused")
+    workflow["sweep"]["pause_requested"] = True
+    _save(workflow)
+    return workflow
+
+
+@router.post(
+    "/workflow-runs/{workflow_id}/resume",
+    operation_id="resume_evaluation_sweep",
+    summary="Resume a paused deployment search.",
+    description="Resume pending sweep candidates using the retained definition, measured results and remaining budget.",
+    response_model=EvaluationWorkflowResponse,
+)
+@owned_control("workflow")
+async def resume_evaluation_sweep(workflow_id: str, request: Request) -> dict:
+    workflow = _get("workflow", workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+    _require_evaluate_record(
+        current_principal(request),
+        workflow,
+        permission="evaluate:run:retry",
+        resource_type="evaluate_workflow",
+        detail="Evaluation access denied",
+    )
+    if not workflow.get("sweep") or workflow["status"] != "paused":
+        raise HTTPException(status_code=409, detail="Only a paused sweep can be resumed")
+    try:
+        _rebind_retry_session(workflow)
+        from llm_d_lens.deploy.guide_sources import discover_local_cluster
+
+        workflow["sweep"]["cluster"] = await discover_local_cluster(request, workflow["cluster_session_id"])
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    workflow["sweep"]["pause_requested"] = False
+    workflow.update(status="queued", finished_at=None)
+    _save(workflow)
+    _workflow_tasks[workflow_id] = asyncio.create_task(_execute_evaluation(workflow_id))
+    return workflow
+
+
+async def _execute_evaluation_cases(workflow_id: str) -> None:
+    workflow = _get("workflow", workflow_id)
     if workflow is None or workflow.get("status") in _TERMINAL_EVALUATE_STATUSES:
         return
     current_task = asyncio.current_task()
@@ -1777,6 +2075,8 @@ async def _execute_evaluation(workflow_id: str) -> None:
     _save(workflow)
     try:
         for case in _ordered_evaluation_cases(workflow["cases"]):
+            if workflow.get("sweep") and case.get("sweep_candidate_id") != workflow["sweep"].get("active_candidate_id"):
+                continue
             if case["status"] in {"succeeded", "cancelled"} or case.get("cancel_requested"):
                 continue
             workflow["active_case_id"] = case["id"]
@@ -1817,7 +2117,9 @@ async def _execute_evaluation(workflow_id: str) -> None:
                         deployment_run_manager.resume_run(deployment.id)
                         case.update(status="deploying", error=None)
                         _save(workflow)
-                        _deployment, ready_case = await _wait_for_deployment(deployment.id)
+                        _deployment, ready_case = await _wait_for_deployment(
+                            deployment.id, **({"refresh": True} if workflow.get("sweep") else {})
+                        )
                         execution = _store.get_execution(ready_case.execution_id)
                         case.update(
                             status="benchmarking",
@@ -1855,7 +2157,9 @@ async def _execute_evaluation(workflow_id: str) -> None:
                     case["deployment_run_id"] = deployment.id
                     _share_suite_deployment(workflow, case, deployment.id)
                     _save(workflow)
-                    _deployment, ready_case = await _wait_for_deployment(deployment.id)
+                    _deployment, ready_case = await _wait_for_deployment(
+                        deployment.id, **({"refresh": True} if workflow.get("sweep") else {})
+                    )
                     execution = _store.get_execution(ready_case.execution_id)
                     case.update(
                         status="benchmarking",
@@ -1895,7 +2199,7 @@ async def _execute_evaluation(workflow_id: str) -> None:
                     except Exception as cleanup_error:
                         case["cleanup_error"] = str(cleanup_error)
                         _save(workflow)
-        if workflow.get("status") != "succeeded":
+        if not workflow.get("sweep") and workflow.get("status") != "succeeded":
             workflow.update(
                 status="cancelled" if any(case.get("cancel_requested") for case in workflow["cases"]) else "succeeded",
                 report=_comparison_report(workflow),
@@ -1925,8 +2229,9 @@ async def _execute_evaluation(workflow_id: str) -> None:
         )
     finally:
         _save(workflow)
-        _workflow_tasks.pop(workflow_id, None)
-        _active_workflows.pop(workflow_id, None)
+        if not workflow.get("sweep"):
+            _workflow_tasks.pop(workflow_id, None)
+            _active_workflows.pop(workflow_id, None)
 
 
 def _now() -> str:
@@ -2055,7 +2360,10 @@ def _get(kind: str, run_id: str) -> dict | None:
         return record.to_record_dict() if record else None
     if kind == "workflow":
         record = _workflow_records.get(record_id)
-        return record.to_record_dict() if record else None
+        payload = record.to_record_dict() if record else None
+        if payload is not None and payload.get("sweep"):
+            payload.setdefault("cases", [])
+        return payload
     raise ValueError("evaluate record kind is invalid")
 
 
@@ -4171,6 +4479,36 @@ async def create_evaluation(request: EvaluationCreateRequest, http_request: Requ
             artifacts[artifact_id] = artifact
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    sweep_state = None
+    if request.sweep is not None:
+        from llm_d_lens.deploy.guide_sources import discover_local_cluster
+
+        from .sweep import generate_candidates
+        from .sweep_execution import planning_base
+
+        try:
+            base_artifact = artifacts[request.benchmark_plans[0].configuration_artifact_id]
+            sweep_state = generate_candidates(request.sweep, planning_base(base_artifact.deployable_configuration))
+            sweep_state["definition"] = request.sweep.model_dump(mode="json")
+            sweep_state["base_configuration"] = base_artifact.deployable_configuration.model_dump(mode="json")
+            sweep_state["cluster"] = await discover_local_cluster(http_request, request.cluster_session_id)
+            sweep_state["base_plan"] = request.benchmark_plans[0].model_dump(mode="json")
+            if request.preview_only:
+                return {
+                    "id": str(uuid4()),
+                    "kind": "workflow",
+                    "status": "queued",
+                    "sweep": {
+                        key: value
+                        for key, value in sweep_state.items()
+                        if key not in {"base_configuration", "base_plan", "cluster"}
+                    },
+                    "preview_only": True,
+                }
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+    elif request.preview_only:
+        raise HTTPException(status_code=422, detail="Preview requires a sweep definition")
     workflow = {
         "kind": "workflow",
         "deployment_ownership": "evaluation",
@@ -4189,7 +4527,7 @@ async def create_evaluation(request: EvaluationCreateRequest, http_request: Requ
         },
         "benchmark_plans": [plan.model_dump(mode="json") for plan in request.benchmark_plans],
         "compare_configurations": request.compare_configurations,
-        "cases": _evaluation_cases(request, artifacts),
+        "cases": [] if sweep_state is not None else _evaluation_cases(request, artifacts),
         "report": None,
     }
     for case in workflow["cases"]:
@@ -4217,6 +4555,9 @@ async def create_evaluation(request: EvaluationCreateRequest, http_request: Requ
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         case["deployment_configuration"] = baseline.model_dump(mode="json")
+    if sweep_state is not None:
+        workflow["sweep"] = sweep_state
+        workflow["cases"] = []
     try:
         _save(workflow)
         _workflow_tasks[workflow["id"]] = asyncio.create_task(_execute_evaluation(workflow["id"]))

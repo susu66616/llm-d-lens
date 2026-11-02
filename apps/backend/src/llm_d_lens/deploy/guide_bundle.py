@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import yaml
 
-from llm_d_lens.configuration.guide_settings import _mapping, _merge
+from llm_d_lens.configuration.guide_settings import _mapping, _merge, apply_router_settings
 from llm_d_lens.configuration.router_compatibility import compatible_router_values
 from llm_d_lens.versions import router_chart, router_chart_version
 
@@ -52,7 +52,7 @@ def _needs_render_service(values: dict) -> bool:
 
 
 async def build_guide_deployment_bundle(
-    guide: str, manifest: dict, model: str, accelerator: str, block_size=None, router_values=""
+    guide: str, manifest: dict, model: str, accelerator: str, block_size=None, router_values="", settings=None
 ) -> dict:
     if guide not in ROUTER_PATHS:
         raise ValueError("This Guide does not have a supported deployment bundle.")
@@ -82,6 +82,7 @@ async def build_guide_deployment_bundle(
     values = _merge(_mapping(base_text), _mapping(guide_text))
     if router_values.strip():
         _merge(values, _mapping(router_values))
+    apply_router_settings(values, settings or {})
     if guide == "precise-prefix-cache-routing":
         epp = values.get("router", {}).get("epp", {})
         key = epp.get("pluginsConfigFile")

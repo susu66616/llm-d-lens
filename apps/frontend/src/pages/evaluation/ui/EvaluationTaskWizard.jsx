@@ -1,3 +1,4 @@
+import SweepInputs, { defaultSweep } from './evaluation/SweepInputs.jsx';
 import { usePolling } from '../../../shared/lib/usePolling.js';
 import { createLatestResourceRequest } from '../../../shared/lib/resourceLoader.js';
 import { useHardwareProfiles } from '../../../shared/lib/useHardwareProfiles.js';
@@ -242,7 +243,7 @@ function configurationFacts(artifact, provider) {
         tp,
         prefillReplicas,
         prefillTp,
-        gpu: replicas * tp + prefillReplicas * prefillTp,
+        gpu: (replicas * tp + prefillReplicas * prefillTp) * Number(content.guideSettings?.slices || 1),
         runtime: content.runtime?.modelServer || content.runtime?.backend || "vLLM",
         blockSize: content.customParameters?.find?.((item) => item.name === "block-size")?.value
             || content.custom_parameters?.find?.((item) => item.name === "block-size")?.value,
@@ -250,6 +251,9 @@ function configurationFacts(artifact, provider) {
 }
 
 export default function EvaluationTaskWizard({ onNavigate }) {
+    const [sweep, setSweep] = useState(null);
+    const [sweepPreview, setSweepPreview] = useState(null);
+    const [sweepError, setSweepError] = useState(null);
     // Snapshot the hand-off once. The hidden Evaluation task list mounted by App
     // consumes the same session key after this screen renders; reading it again on
     // subsequent renders would silently turn a Model Market deploy-only flow back
@@ -556,6 +560,11 @@ export default function EvaluationTaskWizard({ onNavigate }) {
         try { selectedOptimizationPlan(artifact.deployable_configuration.provider_ref, selectionFor(artifact)); return []; }
         catch (error) { return [error.message]; }
     });
+    if (sweep && targetMode === 'configurations') {
+        if (selectedArtifacts.length !== 1) combinationErrors.push('Parameter search requires exactly one base configuration.');
+        if (!Object.keys(sweep.dimensions).length) combinationErrors.push('Select at least one deployment parameter range.');
+        if (Object.values(sweep.dimensions).some(domain => !domain.values && (!(domain.minimum > 0) || !(domain.maximum >= domain.minimum)))) combinationErrors.push('Enter a positive minimum and a maximum at least as large for every selected range.');
+    }
     const runCount = targetMode === "existing" ? tests.length : selectedArtifacts.reduce((sum, artifact) => sum + selectionFor(artifact).length, 0) * tests.length;
     const artifactSummaries = selectedArtifacts.map((item) => configurationSummary(item, providers.get(item.deployable_configuration?.provider_ref)));
 
@@ -640,6 +649,15 @@ export default function EvaluationTaskWizard({ onNavigate }) {
         const nextArtifacts = publishedArtifacts || [];
         if (deployOnPublish) {
             return deployPublishedConfiguration(nextArtifacts);
+        }
+        if (!deployOnly && !selectedArtifacts.length && nextArtifacts.length === 1) {
+            const content = nextArtifacts[0].deployable_configuration.content;
+            const serving = content.decode || content.serving || {};
+            const replicas = Number(serving.replicaCount || 1);
+            const required = Number(configurationFacts(nextArtifacts[0], providers.get(nextArtifacts[0].deployable_configuration.provider_ref)).gpu) || 1;
+            setSweep({ ...defaultSweep(), accelerator_budget: Math.max(required, Number(clusterHardware?.usableGpuCount || clusterHardware?.availableGpuCount || 0)), dimensions: { replicas: { minimum: replicas, maximum: replicas } } });
+            setSweepPreview(null);
+            setSweepError(null);
         }
         if (optimizationSelection) setOptimizationSelections(current => ({...current, ...Object.fromEntries(nextArtifacts.map(item => [item.artifact_id, optimizationSelection]))}));
         // Adopt the accepted configuration's runtime image so it matches exactly
@@ -871,7 +889,8 @@ export default function EvaluationTaskWizard({ onNavigate }) {
                 name: name.trim(),
                 cluster_session_id: cluster.session_id,
                 runtime: {},
-                compare_configurations: evaluationArtifacts.length > 1,
+                sweep: sweep || undefined,
+                compare_configurations: Boolean(sweep) || evaluationArtifacts.length > 1,
                 benchmark_plans: namedArtifacts.map((selectedArtifact, index) => ({
                     id: `setup-${index + 1}`,
                     configuration_artifact_id: selectedArtifact.artifact_id,
@@ -879,7 +898,8 @@ export default function EvaluationTaskWizard({ onNavigate }) {
                     deployment_description: deploymentDescription.trim(),
                     benchmark: effectiveBenchmark,
                     ...selectedOptimizationPlan(selectedArtifact.deployable_configuration.provider_ref, selectionFor(selectedArtifact)),
-                    preserve_deployment: preserveDeployment,
+                    ...(sweep ? { include_configuration: true, include_baseline: false, baseline_types: [] } : {}),
+                    preserve_deployment: sweep ? false : preserveDeployment,
                     scenarios: tests,
                 })),
             });
@@ -961,13 +981,13 @@ export default function EvaluationTaskWizard({ onNavigate }) {
                 </div>}
 
                 {configurationEditor && <div hidden={step !== 1 || targetMode !== 'configurations'}>
-                    <EvaluationConfigurationEditor key={configurationEditor.key} sharedContext={sharedContext} editorResources={editorResources} onBusyChange={setEditorBusy} initialGuide={configurationEditor.guideId} initialArtifact={configurationEditor.artifact} initialOptimizationSelection={configurationEditor.artifact ? optimizationSelections[configurationEditor.artifact.artifact_id] : undefined} busy={editorBusy || busy} onEditSetup={deployOnly ? undefined : () => setStep(0)} onNavigate={onNavigate} onCancel={deployOnPublish ? undefined : () => setConfigurationEditor(null)} onUseSavedConfigurations={!deployOnPublish && !selectedArtifacts.length && compatibleSavedArtifacts.length ? () => { setConfigurationEditor(null); setExistingConfigurationsOpen(true); } : undefined} onPublished={acceptPublishedConfiguration} singleConfiguration={deployOnly} deployOnPublish={deployOnPublish} />
+                    <EvaluationConfigurationEditor key={configurationEditor.key} sharedContext={sharedContext} editorResources={editorResources} onBusyChange={setEditorBusy} initialGuide={configurationEditor.guideId} initialArtifact={configurationEditor.artifact} initialOptimizationSelection={configurationEditor.artifact ? optimizationSelections[configurationEditor.artifact.artifact_id] : undefined} busy={editorBusy || busy} onEditSetup={deployOnly ? undefined : () => setStep(0)} onNavigate={onNavigate} onCancel={deployOnPublish ? undefined : () => setConfigurationEditor(null)} onUseSavedConfigurations={!deployOnPublish && !selectedArtifacts.length && compatibleSavedArtifacts.length ? () => { setConfigurationEditor(null); setExistingConfigurationsOpen(true); } : undefined} onPublished={acceptPublishedConfiguration} singleConfiguration={true} deployOnPublish={deployOnPublish} />
                 </div>}
                 {!deployOnPublish && step === 1 && !configurationEditor && <div className="min-w-0 space-y-5">
                     <div className="flex flex-wrap items-end justify-between gap-4 border-b border-slate-800/70 pb-5">
                         <div className="flex items-start gap-3">
                             <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-cyan-400/25 bg-cyan-400/10 text-cyan-300 shadow-[0_0_24px_rgba(34,211,238,.08)]"><Layers3 className="h-5 w-5" /></span>
-                            <div><p className="text-[9px] font-bold uppercase tracking-[0.2em] text-cyan-400">Step 2 · Deployment design</p><h2 className="mt-1 text-xl font-bold tracking-tight">Configurations for this evaluation</h2><p className="mt-1 max-w-2xl text-[11px] leading-5 text-slate-500">Review the configurations for this evaluation, add comparison configurations, then continue to Benchmark.</p></div>
+                            <div><p className="text-[9px] font-bold uppercase tracking-[0.2em] text-cyan-400">Step 2 · Deployment design</p><h2 className="mt-1 text-xl font-bold tracking-tight">Configurations for this evaluation</h2><p className="mt-1 max-w-2xl text-[11px] leading-5 text-slate-500">Save one base configuration, set deployment parameter ranges below, then continue to Benchmark. Sweep generates the candidate configurations.</p></div>
                         </div>
                         <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[10px] font-semibold ${selectedArtifacts.length ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-300" : "border-slate-700 bg-slate-900/70 text-slate-400"}`}><span className={`h-1.5 w-1.5 rounded-full ${selectedArtifacts.length ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,.8)]" : "bg-slate-600"}`} />{selectedArtifacts.length ? `${selectedArtifacts.length} selected` : "None selected"}</span>
                     </div>
@@ -997,15 +1017,15 @@ export default function EvaluationTaskWizard({ onNavigate }) {
                                 ].map(([label, value]) => <div key={label} className="rounded-lg border border-slate-800/70 bg-theme-bg dark:bg-black/15 px-2.5 py-2"><dt className="text-[8px] uppercase tracking-wide text-slate-600">{label}</dt><dd className="mt-0.5 truncate font-semibold text-slate-200" title={String(value)}>{value}</dd></div>)}</dl>
                                 <OptimizationSelectionSummary guide={item.deployable_configuration.provider_ref} selected={selectionFor(item)} />
                             </article>; })}
-                            <button type="button" onClick={() => openConfiguration(template)} className={`group relative flex items-center gap-4 overflow-hidden rounded-2xl border text-left font-semibold transition-all duration-200 ${selectedArtifacts.length ? "min-h-[110px] self-start border-dashed border-slate-700 bg-slate-950/25 px-5 py-4 text-xs text-slate-300 hover:-translate-y-0.5 hover:border-cyan-500/50 hover:bg-cyan-500/[0.05] hover:text-cyan-200" : "col-span-full min-h-32 w-full border-cyan-400/60 bg-gradient-to-r from-cyan-500/25 via-blue-500/15 to-violet-500/15 px-6 py-5 text-sm text-cyan-50 shadow-[0_16px_40px_rgba(8,145,178,.12)] ring-1 ring-cyan-300/15 hover:-translate-y-0.5 hover:border-cyan-300 hover:from-cyan-500/35 hover:shadow-[0_20px_50px_rgba(8,145,178,.2)]"}`}>
+                            {(!sweep || !selectedArtifacts.length) && <button type="button" onClick={() => openConfiguration(template)} className={`group relative flex items-center gap-4 overflow-hidden rounded-2xl border text-left font-semibold transition-all duration-200 ${selectedArtifacts.length ? "min-h-[110px] self-start border-dashed border-slate-700 bg-slate-950/25 px-5 py-4 text-xs text-slate-300 hover:-translate-y-0.5 hover:border-cyan-500/50 hover:bg-cyan-500/[0.05] hover:text-cyan-200" : "col-span-full min-h-32 w-full border-cyan-400/60 bg-gradient-to-r from-cyan-500/25 via-blue-500/15 to-violet-500/15 px-6 py-5 text-sm text-cyan-50 shadow-[0_16px_40px_rgba(8,145,178,.12)] ring-1 ring-cyan-300/15 hover:-translate-y-0.5 hover:border-cyan-300 hover:from-cyan-500/35 hover:shadow-[0_20px_50px_rgba(8,145,178,.2)]"}`}>
                                 <span aria-hidden="true" className="absolute -right-12 -top-20 hidden h-48 w-48 rounded-full bg-cyan-300/10 blur-2xl transition group-hover:bg-cyan-300/15 dark:block" />
                                 <span className={`flex shrink-0 items-center justify-center rounded-xl border transition ${selectedArtifacts.length ? "h-8 w-8 border-slate-700 bg-slate-900 text-cyan-300 group-hover:border-cyan-500/40" : "h-11 w-11 border-cyan-300/50 bg-cyan-400 text-slate-950 shadow-md shadow-cyan-950/40 group-hover:scale-105"}`}><Plus className={selectedArtifacts.length ? "h-4 w-4" : "h-5 w-5"} /></span>
                                 <span className="relative min-w-0 flex-1"><span className="block">{selectedArtifacts.length ? 'Add another configuration' : 'Create configuration'}</span><span className={`mt-1 block font-normal leading-5 ${selectedArtifacts.length ? "text-[9px] text-slate-500" : "text-xs text-cyan-100/70"}`}>{selectedArtifacts.length ? "Build another setup from Guide defaults" : "Recommended · Start with tuned Guide defaults, then adjust the deployment for your workload."}</span></span>
                                 {!selectedArtifacts.length && <ChevronRight className="h-5 w-5 shrink-0 text-cyan-300 transition group-hover:translate-x-1" />}
-                            </button>
+                            </button>}
                         </div>
                         <details open={existingConfigurationsOpen} onToggle={(event) => setExistingConfigurationsOpen(event.currentTarget.open)} className="configuration-saved-panel group overflow-hidden rounded-2xl border border-slate-800/80 bg-slate-950/30 shadow-lg shadow-black/5"><summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3.5 transition hover:bg-slate-900/50"><div className="flex items-center gap-3"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-slate-700/70 bg-slate-900 text-slate-400 transition group-hover:text-cyan-300"><Code2 className="h-4 w-4" /></span><div><div className="flex flex-wrap items-center gap-2"><h3 className="text-xs font-semibold text-slate-200">Add from saved configurations</h3><span className="rounded-full border border-slate-700/70 bg-slate-900/80 px-2 py-0.5 text-[8px] font-semibold text-slate-500">{compatibleSavedArtifacts.length} available</span></div><p className="mt-1 text-[9px] text-slate-500">Optional · Reuse a compatible setup from this cluster.</p></div></div><ChevronDown className="h-4 w-4 shrink-0 text-slate-500 transition group-open:rotate-180 group-hover:text-cyan-300" /></summary><div className="h-64 space-y-2 overflow-y-auto overscroll-contain border-t border-slate-800/70 bg-black/10 p-3">{compatibleSavedArtifacts.length ? compatibleSavedArtifacts.map((item) => { const facts = configurationFacts(item, providers.get(item.deployable_configuration?.provider_ref)); const selected = artifactIds.includes(item.artifact_id); return <div key={item.artifact_id} className={`flex items-center gap-2 rounded-xl border p-2.5 transition ${selected ? "border-cyan-400/50 bg-cyan-400/[0.08]" : "border-slate-800 bg-slate-950/35 hover:border-slate-700 hover:bg-slate-900/50"}`}><button type="button" onClick={() => selectSavedConfiguration(item.artifact_id)} className="flex min-w-0 flex-1 items-center gap-3 text-left disabled:opacity-40"><span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md border ${selected ? "border-cyan-400 bg-cyan-400 text-slate-950" : "border-slate-600"}`}>{selected && <Check className="h-3.5 w-3.5" />}</span><span className="min-w-0 flex-1"><span className="block truncate font-mono text-[10px] font-semibold text-cyan-200">{item.configuration_file?.file_name || item.artifact_id}</span><span className="mt-1 block text-[9px] text-slate-500">{facts.guide} · {facts.topology} · {facts.model} · {artifactCluster(item).name || "Unknown cluster"}</span></span></button><button type="button" onClick={() => editConfiguration(item)} className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-slate-700 px-2 py-1.5 text-[9px] text-slate-400 hover:text-cyan-200"><Pencil className="h-3 w-3" />Edit</button><button type="button" onClick={() => viewYaml(item)} className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-slate-700 px-2 py-1.5 text-[9px] text-slate-400 hover:text-cyan-200"><Code2 className="h-3 w-3" />Edit YAML</button><button type="button" title="Delete deployed configuration" aria-label={`Delete ${item.configuration_file?.file_name || item.artifact_id}`} onClick={() => removeArtifact(item)} className="shrink-0 rounded-lg border border-red-500/25 p-1.5 text-red-300 hover:bg-red-500/10"><Trash2 className="h-3 w-3" /></button></div>; }) : <p className="flex h-full items-center justify-center rounded-lg border border-dashed border-slate-700 text-center text-xs text-slate-500">No saved configurations.</p>}</div></details>
-                        {selectedArtifacts.length > 0 && <section className="rounded-xl border border-violet-500/25 bg-violet-500/[0.04] p-4">
+                        {!sweep && selectedArtifacts.length > 0 && <section className="rounded-xl border border-violet-500/25 bg-violet-500/[0.04] p-4">
                             <h3 className="flex items-center gap-2 text-xs font-bold"><GitCompareArrows className="h-4 w-4 text-violet-300" />Comparison configurations</h3>
                             <p className="mt-1 text-[10px] text-slate-400">Create and validate another Guide using the first configuration's runtime controls and shared setup. Saved comparisons appear in the selected configurations above. Prefill-only overrides are omitted for single-pool Guides.</p>
                             <div className="mt-3 flex flex-wrap gap-2">{comparisonGuideOptions.map(guide => <button type="button" key={guide.id} disabled={editorBusy || Boolean(configurationEditor)} onClick={() => addComparisonConfiguration(guide.id)} className="rounded-lg border border-violet-500/30 px-3 py-2 text-xs text-violet-200 disabled:opacity-40">Add {guide.label || guide.id}</button>)}</div>
@@ -1025,6 +1045,23 @@ export default function EvaluationTaskWizard({ onNavigate }) {
                     fullBenchmark={provider?.evaluation?.full_workload?.shared_prefix}
                 />}
 
+                {!deployOnPublish && targetMode === 'configurations' && step === 1 && !configurationEditor && selectedArtifacts.length > 0 && <SweepInputs
+                    value={sweep} onChange={next => { setSweep(next); setSweepPreview(null); setSweepError(null); }}
+                    provider={selectedArtifacts[0]?.deployable_configuration?.provider_ref}
+                    runtime={selectedArtifacts[0]?.deployable_configuration?.content?.runtime?.modelServer}
+                    baseContent={selectedArtifacts[0]?.deployable_configuration?.content}
+                    preview={sweepPreview} error={sweepError || (sweep ? combinationErrors[0] : null)} busy={busy}
+                    onPreview={async () => {
+                        setBusy(true); setSweepError(null); setSweepPreview(null);
+                        try {
+                            if (selectedArtifacts.length !== 1) throw new Error('Select exactly one base configuration for parameter search.');
+                            const response = await createEvaluation({ cluster_session_id: cluster.session_id, sweep, preview_only: true,
+                                benchmark_plans: [{ id: 'sweep-base', configuration_artifact_id: selectedArtifacts[0].artifact_id, benchmark: effectiveBenchmark, include_baseline: false, scenarios: tests }] });
+                            setSweepPreview(response.sweep);
+                        } catch (error) { setSweepError(error.message); }
+                        finally { setBusy(false); }
+                    }}
+                />}
                 {!deployOnPublish && step === 3 && <EvaluationPlan
                     configurations={selectedArtifacts.map((artifact) => ({
                         ...configurationFacts(artifact, providers.get(artifact.deployable_configuration?.provider_ref)),

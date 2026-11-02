@@ -111,7 +111,7 @@ Lens 会检查所有部署 provider 渲染的模型服务 Pod 的 `/dev/shm`。�
 
 ## 优雅停止默认配置
 
-Lens 为模型服务器 Pod 设置 **120 秒**终止宽限期和 **5 秒** preStop 延迟；vLLM 容器的启动命令如果是单条可识别的 `vllm serve` 或 `python -m vllm.entrypoints...`（包括 `sh -c` 脚本），还会设置 `--shutdown-timeout=90`；复合 shell 脚本、无法识别的入口以及已有的非字面量取值保持不变，并在部署时给出警告。缩容、滚动更新或节点驱逐时，Kubernetes 会先把 Pod 从路由中移除，vLLM 随后最多用 90 秒完成进行中的请求。在此默认配置引入前创建的部署需要重启或重新创建才能获得这些设置。SGLang 不支持该 vLLM 参数，因此仅适用端点移除和终止宽限期。对于 P/D 部署，请先缩容 Decode 再缩容 Prefill。当模型容器包含 `--kv-transfer-config` 时，Lens 会在该 JSON 中设置 `kv_load_failure_policy=recompute`，使 Decode 在 Prefill 的 KV 传输失败时本地重算。
+Lens 为模型服务器 Pod 设置 **120 秒**终止宽限期和 **5 秒** preStop 延迟；vLLM 容器的启动命令如果是单条可识别的 `vllm serve` 或 `python -m vllm.entrypoints...`（包括 `sh -c` 脚本），还会设置 `--shutdown-timeout=90`；复合 shell 脚本、无法识别的入口以及已有的非字面量取值保持不变，并在部署时给出警告。缩容、滚动更新或节点驱逐时，Kubernetes 会先把 Pod 从路由中移除，vLLM 随后最多用 90 秒完成进行中的请求。在此默认配置引入前创建的部署需要重启或重新创建才能获得这些设置。SGLang 不支持该 vLLM 参数，因此仅适用端点移除和终止宽限期。对于 P/D 部署，请先缩容 Decode 再缩容 Prefill。当模型容器包含 `--kv-transfer-config` 时，Lens 在未设置失败策略时默认使用 `kv_load_failure_policy=recompute`，并保留显式的 `fail` 或 `recompute`，使 Decode 在 Prefill 的 KV 传输失败时本地重算。
 
 ## 为就绪的部署创建本地端口转发
 
@@ -126,7 +126,7 @@ Lens 为模型服务器 Pod 设置 **120 秒**终止宽限期和 **5 秒** preSt
 2. 对于 P/D 部署，设置 **Prefill replicas** 和 **Decode replicas**；对于聚合部署，设置 **Replicas**。
 3. 点击**扩缩容**。
 
-手动扩缩容只修改运行中的 Kubernetes 模型服务器副本。重启部署后会恢复配置中的副本数。DisaggregatedSet 部署创建时固定 `slices: 1`；手动扩缩容只修改角色副本数，永远不修改 `spec.slices`。对于 P/D 部署，请先缩容 Decode 再缩容 Prefill；Prefill 缩容可能中断进行中的 KV 传输，但只要存在 `--kv-transfer-config`，Lens 就会配置 `kv_load_failure_policy=recompute`。
+手动扩缩容只修改运行中的 Kubernetes 模型服务器副本。重启部署后会恢复配置中的副本数。DisaggregatedSet 部署使用配置中的 `slices` 值（默认 Guide 为 1）；手动扩缩容只修改角色副本数，永远不修改 `spec.slices`。对于 P/D 部署，请先缩容 Decode 再缩容 Prefill；Prefill 缩容可能中断进行中的 KV 传输，但未设置 KV 加载失败策略时 Lens 默认使用 `recompute`，并保留显式的 `fail` 或 `recompute`。
 
 ## 打开部署监控与性能分析
 

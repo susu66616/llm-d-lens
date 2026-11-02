@@ -12,9 +12,13 @@ export function validateConfigurationInputs(input) {
     };
     const isPd = guide === 'pd-disaggregation';
     if (runtime.image !== undefined && !runtime.image.trim()) add('image', 'Select a runtime image before generating a configuration.');
-    for (const field of ['cacheCpuGiB', 'rdmaNicCount', 'routerValues']) {
+    for (const field of ['cacheCpuGiB', 'rdmaNicCount', 'slices', 'cacheLruCapacity', 'cacheStorageGiB', 'routerValues']) {
         try { normalizeGuideSettings(guide, guideVariant, { [field]: guideSettings[field] }); }
         catch (error) { add(field, error.message); }
+    }
+    if (guideSettings.cacheStorageClass) {
+        try { normalizeGuideSettings(guide, guideVariant, guideSettings); }
+        catch (error) { add('cacheStorageClass', error.message); }
     }
     if (guideSettings.routerValues?.trim()) {
         try {

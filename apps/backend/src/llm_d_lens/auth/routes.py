@@ -270,6 +270,8 @@ ROUTE_PERMISSIONS: tuple[RoutePermission, ...] = (
     ),
     RoutePermission("GET", "/api/v1/evaluate/workflow-runs/{workflow_id}/details", "evaluate:run:read"),
     RoutePermission("POST", "/api/v1/evaluate/workflow-runs/{workflow_id}/retry", "evaluate:run:retry"),
+    RoutePermission("POST", "/api/v1/evaluate/workflow-runs/{workflow_id}/pause", "evaluate:run:cancel"),
+    RoutePermission("POST", "/api/v1/evaluate/workflow-runs/{workflow_id}/resume", "evaluate:run:retry"),
     # --- model cache ---
     RoutePermission("GET", "/api/v1/model-cache/entries", "model-cache:entry:read"),
     RoutePermission("POST", "/api/v1/model-cache/entries", "model-cache:entry:create"),

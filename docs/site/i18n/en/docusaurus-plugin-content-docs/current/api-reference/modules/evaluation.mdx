@@ -1468,3 +1468,42 @@ observability = await collect_benchmark_observability(
 )
 print(observability.get("clock_alignment"))
 ```
+
+
+### Deployment sweep requests
+
+`POST /api/v1/evaluate/evaluations` accepts an optional `sweep` object with
+`strategy` (`auto`, `grid`, `specified`), `dimensions`, `resource_mode`,
+`accelerator_budget`, `max_trials`, `max_duration_seconds`, `objective` and `seed`.
+Each dimension supplies `minimum`, `maximum` and optional `step`, or explicit `values`.
+Specified mode also requires `specified_candidates`. Supply exactly one base
+`benchmark_plans` entry and disable `preserve_deployment`.
+
+Set `preview_only: true` to validate and preview a sweep without saving or starting
+an evaluation. The response contains `preview_only: true` and `sweep.candidates` /
+`sweep.excluded`. Normal workflow responses retain search state in `sweep`, including
+candidate artifacts, measured scores and `best_candidate_id`. Existing requests
+without `sweep` keep their previous behavior.
+
+Additional sweep controls include `confirmation_trials` (automatic strategy, inside
+`max_trials`), positive `scenario_weights` keyed by scenario ID, and optional
+`patience`. Advanced dimension names use `argument:TARGET:NAME`,
+`environment:TARGET:NAME` (`TARGET` is `both`, `prefill` or `decode`), or
+`guide:cacheCpuGiB`, `guide:rdmaNicCount`, `guide:routerValues`. Use explicit `values`
+for categorical settings. Dedicated runtime controls must use their named dimension.
+Disable independent baseline comparisons (`include_baseline: false`) for a sweep.
+
+`POST /api/v1/evaluate/workflow-runs/{workflow_id}/pause` requests a pause at the next
+clean candidate boundary; `POST /api/v1/evaluate/workflow-runs/{workflow_id}/resume`
+resumes a paused search. They retain the existing cancel/retry permissions and
+workflow resource scope respectively.
+
+### Guide deployment parameters
+
+These settings apply to the four existing Evaluation Guides: Optimized baseline, P/D disaggregation, Tiered prefix cache and Precise prefix cache routing. They do not add experiment types.
+
+- P/D: `guideSettings.slices` replicates the complete `DisaggregatedSet` topology. Role replica counts are per slice. Search accepts `guide:slices`; saved manifests retain their slice count when no override is provided.
+- Tiered cache: `cacheCpuGiB` is per Pod for native vLLM and per TP rank for LMCache. Increasing it grows memory requests/limits and an existing memory-backed shared-memory volume while retaining headroom. `cacheLruCapacity` sets CPU index blocks per server; its value depends on the model and connector. `cacheStorageGiB` and optional `cacheStorageClass` configure the filesystem Guide's existing shared cache PVC. The class must support ReadWriteMany; retention follows its reclaim policy.
+- Optimized baseline and Precise routing retain the selected Guide's routing settings. Precise routing keeps its existing automatic calibration. Advanced overrides use the existing Router YAML input; an override of the CPU plugin document cannot accompany `cacheLruCapacity`.
+
+Changing `guide:cacheLruCapacity` during search rebuilds the Router bundle. Deployment preserves an explicit KV transfer failure policy from the manifest; an unset policy still defaults to `recompute`. Local tests do not establish successful deployment or benchmark completion on a real cluster.

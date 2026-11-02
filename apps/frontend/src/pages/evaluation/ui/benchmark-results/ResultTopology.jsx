@@ -67,7 +67,7 @@ export function buildResultTopology(run = {}, guideType) {
         if (fsKnown) { nodes.push(logical('filesystem', 'Filesystem', 2, { status: 'Configured tier', resource: { guide_variant: variant }, description: 'Configured storage tier; successful cache restores require separate telemetry.' })); connect(cpuKnown ? 'cpu' : 'hbm', 'filesystem', 'Storage hierarchy'); }
         actualNodes.forEach(node => nodes.push({ ...node, column: 3 }));
     } else {
-        nodes.push(logical('entry', 'Service entry', 0, { description: 'Logical entry point, not a measured router instance.' }));
+        nodes.push(logical('entry', 'Service entry', 0, { resource: guideType === 'pd-disaggregation' ? { slices: run.configuration?.guideSettings?.slices ?? run.configuration?.guide_settings?.slices ?? 'Inherited from manifest', replicaScope: 'Per slice' } : undefined, description: 'Logical entry point, not a measured router instance.' }));
         // Namespace snapshots include benchmark and monitoring pods. The collector's
         // model-server role is a fallback, so it is not positive serving identity.
         const hasServingIdentity = node => node.status === 'Observed endpoint' || (node.status === 'Observed pod' && ['prefill', 'decode', 'router', 'epp'].includes(node.role));

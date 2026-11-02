@@ -20,7 +20,13 @@ from llm_d_lens.hardware.registry import all_profiles
 from llm_d_lens.hardware.resolver import resolve_by_accelerator_key, resolve_by_device_class, resolve_by_resource
 from llm_d_lens.versions import router_pd_sidecar_image
 
-from .guide_runtime import apply_runtime_overrides, configure_cpu_cache, configure_model_server, runtime_overrides
+from .guide_runtime import (
+    apply_runtime_overrides,
+    configure_cache_memory,
+    configure_cpu_cache,
+    configure_model_server,
+    runtime_overrides,
+)
 from .remote_deploy import RemoteError
 
 router = APIRouter(prefix="/api/guide-planning", include_in_schema=False)
@@ -330,25 +336,60 @@ def estimate_model(model: str) -> dict:
 def normalize_guide_settings(guide: str, settings) -> dict:
     if not isinstance(settings, dict):
         raise ValueError("Guide settings must be an object.")
-    if set(settings) - {"cacheCpuGiB", "rdmaNicCount", "routerValues"}:
+    if set(settings) - {
+        "cacheCpuGiB",
+        "rdmaNicCount",
+        "slices",
+        "cacheLruCapacity",
+        "cacheStorageGiB",
+        "cacheStorageClass",
+        "routerValues",
+    }:
         raise ValueError("Unknown Guide setting.")
     result = {}
-    for field in ("cacheCpuGiB", "rdmaNicCount"):
+    for field in (
+        "cacheCpuGiB",
+        "rdmaNicCount",
+        "slices",
+        "cacheLruCapacity",
+        "cacheStorageGiB",
+    ):
         raw = settings.get(field)
         if raw is None or str(raw).strip() == "":
             continue
         try:
+            if isinstance(raw, bool):
+                raise ValueError
             value = float(raw)
-            if not math.isfinite(value) or value <= 0 or (field == "rdmaNicCount" and not value.is_integer()):
+            if (
+                not math.isfinite(value)
+                or value <= 0
+                or (field in {"rdmaNicCount", "slices", "cacheLruCapacity"} and not value.is_integer())
+            ):
                 raise ValueError
         except (TypeError, ValueError) as error:
-            label = "integer" if field == "rdmaNicCount" else "number"
+            label = "integer" if field in {"rdmaNicCount", "slices", "cacheLruCapacity"} else "number"
             raise ValueError(f"{field} must be a positive {label}.") from error
         result[field] = int(value) if value.is_integer() else value
+    if "cacheLruCapacity" in result and guide != "tiered-prefix-cache":
+        raise ValueError("CPU index capacity requires tiered caching.")
+    if "slices" in result and guide != "pd-disaggregation":
+        raise ValueError("Slices require a P/D Guide.")
     if "cacheCpuGiB" in result and guide != "tiered-prefix-cache":
         raise ValueError("CPU cache capacity requires a supported CPU offload variant.")
     if "rdmaNicCount" in result and guide != "pd-disaggregation":
         raise ValueError("NIC count requires the P/D RDMA variant.")
+    if "cacheStorageGiB" in result and guide != "tiered-prefix-cache":
+        raise ValueError("Filesystem cache storage requires a tiered Guide.")
+    storage_class = settings.get("cacheStorageClass")
+    if storage_class not in (None, ""):
+        if (
+            not isinstance(storage_class, str)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", storage_class)
+            or "cacheStorageGiB" not in result
+        ):
+            raise ValueError("Cache StorageClass requires filesystem cache capacity and a valid class name.")
+        result["cacheStorageClass"] = storage_class
     values = settings.get("routerValues")
     if values is not None and not isinstance(values, str):
         raise ValueError("Router values must be YAML text.")
@@ -391,9 +432,73 @@ def plan_documents(
         settings = normalize_guide_settings(requested.get("guide", ""), requested.get("guideSettings", {}))
     except ValueError:
         logger.warning("Invalid Guide settings", exc_info=True)
-        errors.append("Invalid Guide settings; check cacheCpuGiB, rdmaNicCount and routerValues.")
+        errors.append("Invalid Guide settings; check topology, cache, routing and KV transfer settings.")
     profile = profile_for_key(requested.get("accelerator", ""))
+    if "slices" in settings:
+        sets = [doc for doc in documents if doc.get("kind") == "DisaggregatedSet"]
+        if not sets:
+            errors.append("Slices require a DisaggregatedSet Guide.")
+        for doc in sets:
+            spec = doc.setdefault("spec", {})
+            patches.append(
+                {
+                    "op": "replace" if "slices" in spec else "add",
+                    "path": f"/documents/{documents.index(doc)}/spec/slices",
+                    "value": settings["slices"],
+                    "reason": "apply requested P/D slices",
+                }
+            )
+            spec["slices"] = settings["slices"]
     workloads = workload_roles(documents)
+    if "cacheStorageGiB" in settings:
+        cache_claims = set()
+        for workload in workloads:
+            pod = workload["pod"]
+            mounts = {
+                mount.get("name")
+                for container in pod.get("containers", [])
+                for mount in container.get("volumeMounts", [])
+                if mount.get("mountPath") == "/mnt/files-storage"
+            }
+            cache_claims.update(
+                volume["persistentVolumeClaim"]["claimName"]
+                for volume in pod.get("volumes", [])
+                if volume.get("name") in mounts and volume.get("persistentVolumeClaim", {}).get("claimName")
+            )
+        if len(cache_claims) != 1:
+            errors.append(
+                "Filesystem cache capacity requires one shared PVC mounted at /mnt/files-storage in the Guide."
+            )
+        else:
+            name = next(iter(cache_claims))
+            claim = next(
+                (
+                    doc
+                    for doc in documents
+                    if doc.get("kind") == "PersistentVolumeClaim" and doc.get("metadata", {}).get("name") == name
+                ),
+                None,
+            )
+            if claim is None:
+                claim = {
+                    "apiVersion": "v1",
+                    "kind": "PersistentVolumeClaim",
+                    "metadata": {"name": name},
+                    "spec": {"accessModes": ["ReadWriteMany"]},
+                }
+                documents.append(claim)
+            spec = claim.setdefault("spec", {})
+            spec.setdefault("resources", {}).setdefault("requests", {})["storage"] = f"{settings['cacheStorageGiB']}Gi"
+            if "cacheStorageClass" in settings:
+                spec["storageClassName"] = settings["cacheStorageClass"]
+            patches.append(
+                {
+                    "op": "add",
+                    "path": f"/documents/{documents.index(claim)}",
+                    "value": deepcopy(claim),
+                    "reason": "configure shared filesystem KV cache PVC",
+                }
+            )
     cluster_accel = (cluster or {}).get("accelerator") or {}
     machine_accel = machine.get("accelerator") or {}
     cluster_count = cluster_accel.get("count") or accelerator_total(
@@ -672,7 +777,7 @@ def plan_documents(
         if memory > 0:
             capacity = min(capacity, math.floor((allocatable.get("memoryGiB") or machine.get("memoryGiB", 0)) / memory))
         capacity = max(0, capacity)
-        if replicas > capacity:
+        if replicas * slices > capacity:
             errors.append(
                 f"{role} replicas={replicas:g} exceed selected cluster CPU/RAM capacity ({capacity}); "
                 "reduce the topology in the configuration editor."
@@ -680,8 +785,8 @@ def plan_documents(
         if available > 0 and per_replica > 0:
             capacity = min(capacity, math.floor(available / per_replica))
         if not math.isfinite(capacity):
-            capacity = guide_count
-        planned_count = int(replicas) if replicas > 0 else min(guide_count, capacity)
+            capacity = guide_count * slices
+        planned_count = int(replicas) if replicas > 0 else min(guide_count, capacity // slices)
         if planned_count != guide_count:
             replace(
                 spec,
@@ -748,8 +853,9 @@ def plan_documents(
                 if "cacheCpuGiB" in settings:
                     if any(item["name"] in {"kv-transfer-config", "LMCACHE_MAX_LOCAL_CPU_SIZE"} for item in selected):
                         raise ValueError("CPU cache capacity conflicts with a custom connector/cache override.")
+                    configure_cache_memory(container, pod, settings["cacheCpuGiB"])
                     configure_cpu_cache(container, settings["cacheCpuGiB"])
-                for key in ("command", "args", "env"):
+                for key in ("command", "args", "env", "resources"):
                     if before.get(key) != container.get(key):
                         patch = {
                             "op": "add" if key not in before else "replace",
@@ -848,6 +954,27 @@ def plan_documents(
                         f"run under the {runtime_class} container runtime so the container can access the accelerator"
                     ),
                 }
+            )
+    if "cacheCpuGiB" in settings:
+        from kubernetes.utils.quantity import parse_quantity
+
+        required_memory = (
+            sum(
+                int(parse_quantity(container.get("resources", {}).get("requests", {}).get("memory", "0")))
+                * int(workload["spec"].get("replicas", 1))
+                * int(workload.get("slices", 1))
+                for workload in workloads
+                for container in workload["pod"].get("containers", [])
+            )
+            / 1024**3
+        )
+        memory_budget = (cluster or {}).get("allocatable", {}).get("memoryGiB") or machine.get("memoryGiB")
+        if memory_budget and required_memory > memory_budget:
+            errors.append("CPU cache memory requests exceed the selected cluster memory budget.")
+        if "cacheLruCapacity" not in settings:
+            warnings.append(
+                "CPU cache size changed: set CPU cache index capacity for this model and connector; "
+                "the Guide sample is unchanged."
             )
     demand = validate_manifest_capacity(documents, available, basis, errors)
     if cluster and not cluster.get("preflightPassed"):
@@ -1114,6 +1241,7 @@ async def plan(request: Request):
                     resolved,
                     block_sizes[0] if block_sizes else None,
                     settings.get("routerValues", ""),
+                    settings,
                 ),
             )
         timings["render"] = round((time.monotonic() - render_started) * 1000)

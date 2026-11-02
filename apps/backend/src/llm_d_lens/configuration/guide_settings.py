@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from .manifest_facts import _invocation_tokens, _option
+from .manifest_facts import _invocation_tokens, _option, workload_roles
 from .router_compatibility import compatible_router_values
 
 
@@ -37,22 +37,63 @@ def _merge(base: dict, overlay: dict) -> dict:
     return base
 
 
+def apply_router_settings(values: dict, settings: dict) -> dict:
+    """Apply typed settings to the selected Guide's plugins, rejecting YAML conflicts."""
+    if "cacheLruCapacity" not in settings:
+        return values
+    epp = values.get("router", {}).get("epp", {})
+    key = epp.get("pluginsConfigFile")
+    custom = epp.get("pluginsCustomConfig") or {}
+    if key not in custom:
+        raise ValueError("Typed routing settings require Guide plugin configuration")
+    override = _mapping(settings["routerValues"]) if settings.get("routerValues", "").strip() else {}
+    if key in override.get("router", {}).get("epp", {}).get("pluginsCustomConfig", {}):
+        raise ValueError("Typed routing settings conflict with the custom plugin YAML; choose one source")
+    document = _mapping(custom[key])
+    matches = [
+        plugin
+        for plugin in document.get("plugins", [])
+        if plugin.get("type") == "approx-prefix-cache-producer" and plugin.get("name") == "cpu-prefix-cache-producer"
+    ]
+    if len(matches) != 1:
+        raise ValueError("CPU index capacity requires one cpu-prefix-cache-producer in this Guide")
+    matches[0].setdefault("parameters", {})["lruCapacityPerServer"] = settings["cacheLruCapacity"]
+    custom[key] = yaml.safe_dump(document, sort_keys=False)
+    return values
+
+
 def validate_guide_settings(content: dict[str, Any], manifest: str, guide: str) -> None:
     settings = content.get("guideSettings", {})
     if settings is None:
         settings = {}
-    if not isinstance(settings, dict) or set(settings) - {"cacheCpuGiB", "rdmaNicCount", "routerValues"}:
+    if not isinstance(settings, dict) or set(settings) - {
+        "cacheCpuGiB",
+        "rdmaNicCount",
+        "slices",
+        "cacheLruCapacity",
+        "cacheStorageGiB",
+        "cacheStorageClass",
+        "routerValues",
+    }:
         raise ValueError("Unknown Guide settings")
-    for key in ("cacheCpuGiB", "rdmaNicCount"):
+    for key in (
+        "cacheCpuGiB",
+        "rdmaNicCount",
+        "slices",
+        "cacheLruCapacity",
+        "cacheStorageGiB",
+    ):
         value = settings.get(key)
         if value is not None and (
             isinstance(value, bool)
             or not isinstance(value, (int, float))
             or not math.isfinite(value)
             or value <= 0
-            or (key == "rdmaNicCount" and int(value) != value)
+            or (key in {"rdmaNicCount", "slices", "cacheLruCapacity"} and int(value) != value)
         ):
             raise ValueError(f"Invalid Guide setting {key}")
+    if settings.get("cacheLruCapacity") is not None and guide != "tiered-prefix-cache":
+        raise ValueError("CPU index capacity requires tiered caching")
     capacity = settings.get("cacheCpuGiB")
     nic_count = settings.get("rdmaNicCount")
     if capacity is not None and guide != "tiered-prefix-cache":
@@ -60,11 +101,50 @@ def validate_guide_settings(content: dict[str, Any], manifest: str, guide: str) 
     if nic_count is not None and not _rdma_device_class(content):
         raise ValueError("NIC count requires the P/D RDMA variant")
     documents = [doc for doc in yaml.safe_load_all(manifest) if isinstance(doc, dict)]
+    if settings.get("cacheStorageGiB") is not None:
+        from kubernetes.utils.quantity import parse_quantity
+
+        claims = {
+            volume["persistentVolumeClaim"]["claimName"]
+            for workload in workload_roles(documents)
+            for volume in workload["pod"].get("volumes", [])
+            if volume.get("persistentVolumeClaim", {}).get("claimName")
+            and any(
+                mount.get("name") == volume.get("name") and mount.get("mountPath") == "/mnt/files-storage"
+                for container in workload["pod"].get("containers", [])
+                for mount in container.get("volumeMounts", [])
+            )
+        }
+        matches = [
+            doc
+            for doc in documents
+            if doc.get("kind") == "PersistentVolumeClaim" and doc.get("metadata", {}).get("name") in claims
+        ]
+        if guide != "tiered-prefix-cache" or len(claims) != 1 or len(matches) != 1:
+            raise ValueError("Filesystem cache settings require a matching shared PVC")
+        spec = matches[0].get("spec", {})
+        if parse_quantity(spec.get("resources", {}).get("requests", {}).get("storage", "0")) != parse_quantity(
+            f"{settings['cacheStorageGiB']}Gi"
+        ):
+            raise ValueError("Filesystem cache capacity does not match the rendered PVC")
+        if settings.get("cacheStorageClass") is not None and settings["cacheStorageClass"] != spec.get(
+            "storageClassName"
+        ):
+            raise ValueError("Filesystem cache StorageClass does not match the rendered PVC")
+    elif settings.get("cacheStorageClass"):
+        raise ValueError("Filesystem StorageClass requires cache capacity")
+    if settings.get("slices") is not None:
+        sets = [doc for doc in documents if doc.get("kind") == "DisaggregatedSet"]
+        if (
+            guide != "pd-disaggregation"
+            or not sets
+            or any(doc.get("spec", {}).get("slices", 1) != settings["slices"] for doc in sets)
+        ):
+            raise ValueError("Slices do not match the P/D DisaggregatedSet manifest")
     servers = [
         container
-        for doc in documents
-        if doc.get("kind") == "Deployment"
-        for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+        for workload in workload_roles(documents)
+        for container in workload["pod"].get("containers", [])
         if container.get("name") == "modelserver"
     ]
     if capacity is not None:
@@ -101,7 +181,7 @@ def validate_guide_settings(content: dict[str, Any], manifest: str, guide: str) 
         raise ValueError("Router values must be YAML text")
     bundle = (content.get("officialGuide") or {}).get("deploymentBundle")
     if not bundle:
-        if router_values.strip():
+        if router_values.strip() or "cacheLruCapacity" in settings:
             raise ValueError("Router settings require a saved deployment bundle")
         return
     layers = {asset["name"]: asset["content"] for asset in bundle["helm"]["values"]}
@@ -110,6 +190,7 @@ def validate_guide_settings(content: dict[str, Any], manifest: str, guide: str) 
     expected = _merge(_mapping(layers["router-base.yaml"]), _mapping(layers["router-guide.yaml"]))
     if router_values.strip():
         _merge(expected, _mapping(router_values))
+    apply_router_settings(expected, settings)
     if guide == "precise-prefix-cache-routing":
         sizes = {
             _option(_invocation_tokens(container, "precise"), {"--block-size"}, "precise") for container in servers

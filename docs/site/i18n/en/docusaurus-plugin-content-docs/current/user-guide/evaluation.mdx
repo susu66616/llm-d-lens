@@ -47,7 +47,7 @@ select it again in Evaluation.
 1. Open **Evaluation → New Task** and choose **Deploy configurations**.
 2. On **Select**, choose the saved configurations to compare. Use configurations for the same cluster and model.
 3. Need a configuration? Click **Create configuration**, select a [Guide](/evaluation/guides), configure resources, and generate the YAML.
-4. Review and save the configuration. Back in the task dialog, select it along with the other candidates.
+4. Review and save one base configuration. In Deploy, select the parameters to search and set their minimum, maximum and step. Sweep generates candidates; you do not need to add them individually.
 5. Click **Next** to open **Benchmark & comparison**.
 6. Choose a suite or configure a workload with the [parameter guide](/evaluation/parameters). Use the same input lengths and load for all candidates.
 7. Review the selected candidates and baselines, then click **Launch evaluation**.
@@ -249,3 +249,53 @@ benchmarking and comparison, while final cleanup continues in the background;
 accelerators may still be allocated. Cleanup failures are recorded separately
 without changing the successful result. Deleting the task waits for in-flight
 cleanup before removing its history.
+
+
+## Deployment parameter search
+
+In the Deploy step, configure **Search parameter ranges** after selecting one base
+configuration. Unselected parameters remain fixed. Set minimum and maximum values,
+an optional sampling step, an accelerator budget, an objective and a trial/time budget.
+TP ranges are discrete search domains, not a promise that every integer is supported.
+The Guide planner validates each selected candidate before deployment.
+
+Automatic search explores sampled ranges reproducibly and refines near measured
+leaders while retaining exploration. Complete grid evaluates every resource-valid
+sampled combination and rejects a trial budget smaller than that grid. Fixed-resource
+mode filters combinations to the specified accelerator count; maximum-resource mode
+also retains smaller deployments. PD resource accounting includes both roles.
+
+Preview shows resource-valid candidates and exclusions without creating deployments.
+Candidates are rendered into independent configuration artifacts, benchmarked using
+the same scenarios, and cleaned before the next configuration. A failed configuration
+does not stop other candidates; unresolved cleanup stops the search. Time budgets
+bound benchmark execution; cleanup must still finish before resources can be reused.
+
+Results distinguish pending, failed and successful candidates. Missing objective
+metrics and unmet SLOs are not ranked. Goodput never falls back to raw throughput.
+The recommendation is the best measured candidate, not a guarantee of a global optimum.
+
+Automatic search reserves confirmation runs within the trial budget. Successful
+repeats contribute to the reported mean and range; failed confirmation prevents a
+candidate from being recommended. Advanced parameter options accept runtime
+arguments, environment variables and supported Guide settings. These are validated
+by the existing runtime and Guide configuration contracts, not assumed portable
+across runtimes. Do not interpret performance-only measurements as a quality check
+when changing precision or quantization.
+
+**Pause after current configuration** finishes the current measurement and cleanup
+before pausing. **Resume search** retains prior measurements and the remaining budget.
+**Deploy best measured configuration** starts a separate deployment from the saved
+winning artifact and requires deployment-create permission.
+
+### Guide deployment parameters
+
+These settings apply to the four existing Evaluation Guides: Optimized baseline, P/D disaggregation, Tiered prefix cache and Precise prefix cache routing. They do not add experiment types.
+
+- P/D: `guideSettings.slices` replicates the complete `DisaggregatedSet` topology. Role replica counts are per slice. Search accepts `guide:slices`; saved manifests retain their slice count when no override is provided.
+- Tiered cache: `cacheCpuGiB` is per Pod for native vLLM and per TP rank for LMCache. Increasing it grows memory requests/limits and an existing memory-backed shared-memory volume while retaining headroom. `cacheLruCapacity` sets CPU index blocks per server; its value depends on the model and connector. `cacheStorageGiB` and optional `cacheStorageClass` configure the filesystem Guide's existing shared cache PVC. The class must support ReadWriteMany; retention follows its reclaim policy.
+- Optimized baseline and Precise routing retain the selected Guide's routing settings. Precise routing keeps its existing automatic calibration. Advanced overrides use the existing Router YAML input; an override of the CPU plugin document cannot accompany `cacheLruCapacity`.
+
+Changing `guide:cacheLruCapacity` during search rebuilds the Router bundle. Deployment preserves an explicit KV transfer failure policy from the manifest; an unset policy still defaults to `recompute`. Local tests do not establish successful deployment or benchmark completion on a real cluster.
+
+New Evaluation configurations use one base configuration and enable range search when the first configuration is saved. Initial replica bounds match that configuration; widen the selected ranges to explore alternatives. Cache and NIC controls are listed for their Guide, with support validated during planning. Unknown inherited values remain blank until a range is entered. Existing saved configuration comparisons remain available.

@@ -1,3 +1,6 @@
+import { useAuth } from '../../auth';
+import { startLocalDeployment } from '../../optimization';
+import { Button } from '../../../shared/ui';
 import { downloadBlob } from '../../../shared/lib/download';
 import { evaluationApi as api } from '../model/client';
 import { TERMINAL_EVALUATION_STATUSES as terminalStatuses, evaluationStatusTone } from '../model/domain';
@@ -163,6 +166,8 @@ function resolveGuideType(details) {
 }
 
 export default function OptimizationEvaluationDetails({ onNavigate }) {
+    const { can } = useAuth();
+    const [deployingWinner, setDeployingWinner] = useState(false);
     const params = new URLSearchParams(window.location.search);
     const evaluationId = params.get("evaluationId") || "";
     const runKind = params.get("runKind") || "workflow";
@@ -348,6 +353,32 @@ export default function OptimizationEvaluationDetails({ onNavigate }) {
                 <button title="Refresh deployment status and details" onClick={() => loadDetails({ refreshDeployments: true })} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-700 bg-slate-900 text-slate-300 hover:border-cyan-500 hover:text-cyan-200"><RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} /></button>
             </div>
         </header>
+        {details?.workflow?.sweep && <section className="m-4 space-y-3 rounded border border-theme-border p-4 text-theme-text" aria-label="Parameter search results">
+            <h2 className="font-semibold">Deployment parameter search</h2>
+            {details.workflow.sweep.best_candidate_id && can('deployment:run:create') && <Button disabled={deployingWinner} isLoading={deployingWinner} onClick={async () => {
+                setDeployingWinner(true);
+                try {
+                    const winner = details.workflow.sweep.candidates.find(item => item.id === details.workflow.sweep.best_candidate_id);
+                    const artifact = await api(`/api/v1/configurations/artifacts/${encodeURIComponent(winner.configuration_artifact_id)}`);
+                    const configuration = artifact.deployable_configuration;
+                    await startLocalDeployment([configuration], { cluster_session_id: details.workflow.cluster_session_id, cluster_server_id: details.workflow.cluster_id, deployment_source: { kind: 'evaluation-search-result' }, evaluation_search_id: evaluationId }, configuration.provenance?.placement);
+                    onNavigate('optimization-deployments');
+                } catch (error) { setError(error.message); }
+                finally { setDeployingWinner(false); }
+            }}>Deploy best measured configuration</Button>}
+
+            <Button variant="secondary" disabled={!can(details.workflow.status === 'paused' ? 'evaluate:run:retry' : 'evaluate:run:cancel') || loading || !['running', 'queued', 'paused'].includes(details.workflow.status) || details.workflow.sweep.pause_requested && details.workflow.status !== 'paused'} onClick={async () => {
+                try { await api(`/api/v1/evaluate/workflow-runs/${encodeURIComponent(evaluationId)}/${details.workflow.status === 'paused' ? 'resume' : 'pause'}`, { method: 'POST' }); await loadDetails(); }
+                catch (error) { setError(error.message); }
+            }}>{details.workflow.status === 'paused' ? 'Resume search' : details.workflow.sweep.pause_requested ? 'Pausing after current configuration' : 'Pause after current configuration'}</Button>
+            <p className="text-sm text-theme-muted">{details.workflow.sweep.conclusion || 'Search in progress. Pending candidates have not been measured.'}</p>
+            <p className="text-sm">Objective: {details.workflow.sweep.definition.objective} · Budget: {details.workflow.sweep.definition.max_trials} configurations · Excluded: {details.workflow.sweep.excluded.length}</p>
+            <div className="max-h-96 overflow-auto"><table className="w-full text-left text-sm"><thead><tr><th>Configuration</th><th>Status</th><th>Accelerators</th><th>Score</th><th>Evidence / reason</th></tr></thead><tbody>{details.workflow.sweep.candidates.map(candidate => <tr key={candidate.id}>
+                <td>{Object.entries(candidate.parameters).map(([key, value]) => `${key}=${value}`).join(', ')}{candidate.id === details.workflow.sweep.best_candidate_id ? ' (best measured)' : ''}</td>
+                <td>{candidate.status}</td><td>{candidate.accelerator_count}</td><td>{candidate.score ?? 'Not ranked'}</td><td>{candidate.error || candidate.ranking_reason || candidate.configuration_checksum || 'Not measured'}</td>
+            </tr>)}</tbody></table></div>
+            <details><summary>Excluded combinations</summary>{details.workflow.sweep.excluded.map(candidate => <p key={candidate.id} className="text-sm">{JSON.stringify(candidate.parameters)}: {candidate.reason}</p>)}</details>
+        </section>}
         {details?.workflow?.endpoint_used && <div className="border-b border-theme-border p-4 text-[10px] text-slate-400">
             <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-semibold uppercase tracking-wider text-cyan-300">Actual benchmark target</span><span>{details.workflow.endpoint_preflight?.status === "reachable" ? `Reachable (HTTP ${details.workflow.endpoint_preflight.http_status})` : "Target recorded by benchmark runner"}</span></div>
             <p className="mt-1 break-all font-mono text-slate-300">{details.workflow.endpoint_used}</p>
