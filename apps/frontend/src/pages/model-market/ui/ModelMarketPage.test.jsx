@@ -41,11 +41,10 @@ test('deployment context keeps the default only when model card context is missi
 test('both deployment modes identify the model and cluster without redundant numbered stages', () => {
     for (const Workspace of [ManualDeploymentWorkspace, AgenticDeploymentWorkspace]) {
         const html = renderToStaticMarkup(authenticated(createElement(Workspace, { draft: { model: 'fixture/model', modelTitle: 'Fixture Model', clusterName: 'Research cluster', deploymentName: 'long-generated-name' }, embedded: true })));
-        assert.match(html, /<h2[^>]*>Fixture Model<\/h2>/);
-        assert.match(html, />Model<\/dt>/);
-        assert.match(html, />Cluster<\/dt>/);
+        assert.match(html, /<h2[^>]*>(?:Manual|Agentic) plan<\/h2>/);
+        assert.equal((html.match(/Fixture Model/g) || []).length, 1);
         assert.match(html, /Research cluster/);
-        assert.match(html, /Deployment target details/);
+        assert.doesNotMatch(html, /Deployment target details|Planning mode<\/dt>/);
         assert.doesNotMatch(html, /aria-label="Deployment workflow"|<h2[^>]*>long-generated-name/);
         assert.doesNotMatch(html, /Custom vLLM parameters|GPU capacity for planning|Template-based deployment/);
     }
@@ -63,6 +62,10 @@ test('workload inputs are optional hints, not assumed traffic or compatibility g
         assert.match(html, /No live deployment is changed/);
         assert.match(html, /does not switch optimizations on or off/);
         assert.doesNotMatch(html, /<details[^>]* open|aria-label="Requirement steps"|>Continue</);
+        const visible = html.replace(/<details[\s\S]*?<\/details>/g, '');
+        assert.doesNotMatch(visible, /<input|<textarea|<select/);
+        assert.match(html, /No required parameters/);
+        if (mode === 'agentic') assert.match(visible, />Balanced<|>Low latency<|>High throughput</);
         assert.doesNotMatch(html, /Tensor parallel|gpu-memory-utilization/);
     }
 });
@@ -108,15 +111,30 @@ test('model catalog preserves search and removes legacy pre-generation runtime c
     assert.match(html, />Model Catalog<\/button>/);
     assert.match(html, />Manual</);
     assert.match(html, />Agentic</);
-    assert.match(html, /Compatible optimizations/);
-    assert.match(html, /Goal-based recommendation/);
-    assert.match(html, /Planning strategy/);
-    assert.match(html, /Model files/);
-    assert.match(html, /Prepare model files/);
+    assert.match(html, /Compose, then adjust/);
+    assert.match(html, /Start with your objective/);
+    assert.match(html, /Choose how to build your plan/);
+    assert.equal((html.match(/type="submit"/g) || []).length, 1);
+    assert.ok(html.indexOf('id="deployment-mode"') < html.indexOf('id="deployment-target"'));
+    assert.match(html, /1–3 Walkthrough/);
+    assert.match(html, /Choose an environment/);
+    assert.match(html, /Try Intel XPU mock/);
+    assert.doesNotMatch(html, /Current setup|Change target|Prepare model files|No storage volumes available/);
     assert.doesNotMatch(html, /aria-current="step"|1\. Target|2\. Deployment plan/);
-    assert.match(html, /Nothing deploys without your confirmation/);
-    assert.match(html, /Build deployment plan/);
+    assert.match(html, /Build Manual plan/);
     assert.doesNotMatch(html, /Name and notes|Notes<textarea|Complete the workload picture/);
     assert.doesNotMatch(html, />Replicas<|>Tensor parallelism<|Custom vLLM parameters|Template-based deployment/);
     assert.match(renderPage(false), /Your role cannot create deployments/);
+});
+
+test('saved constraints remain visible and unchanged when the simplified form is reopened', () => {
+    const html = renderToStaticMarkup(createElement(DeploymentRequirementsForm, {
+        mode: 'agentic', initialValue: { objective: 'reliability', maxAccelerators: '8', ttftMs: '500', tpotMs: '20', inputTokens: '4096', forbiddenFeatures: ['external_kv_cache'] },
+    }));
+    assert.match(html, /aria-pressed="true"[^>]*>Reliability/);
+    assert.match(html, /value="500"/);
+    assert.match(html, /value="20"/);
+    assert.match(html, /value="4096"/);
+    assert.match(html, /<details open="">/);
+    assert.doesNotMatch(html, /Predicted TTFT|GPU rental/);
 });

@@ -8,31 +8,47 @@ description: 查找部署、确认就绪状态、查看日志并删除不再使�
 
 ## 配置和审阅 Manual 或 Agentic 方案
 
-创建流程将两种策略标为 **Compatible optimizations（兼容优化优先，Manual）**
-和 **Goal-based recommendation（按目标推荐，Agentic）**，共用 **Target → Deployment plan
-→ Deploy and observe**。后台模式标识与审批规则不变。
+先在两张醒目的卡片中选择 **Manual** 或 **Agentic**，再查看简洁的环境卡。
+存在就绪集群时会预选，部署名称自动生成，模型缓存自动检查。
+**Change setup**集中打开集群、名称与模型缓存控件；模型缓存未就绪时仍需准备模型文件。
+两种模式都不要求先填写硬件规格或选择 Guide。
 
-Manual 自动组合适用且已支持的优化，不要求选择 Guide 或填写硬件规格。
-Agentic 根据目标推荐优化组合。两者自动发现集群资源并生成、校验配置。
-Manual 选择目标后直接构建方案，不再展示 Notes 或负载问卷。
-可选的 **Workload and constraints（负载与约束）** 用于容量和目标调优；
-负载未知或预期复用较低不会排除技术兼容的优化。
+**Build Manual plan**组合适用、已支持且兼容的优化并进入配置审阅。
+Agentic 在同一入口页提供 Balanced、Low latency、High throughput，
+点击 **Build Agentic plan**直接进入生成的方案，没有额外问卷页。保留 Balanced 即可不填参数继续；恢复已有方案时保留其他已支持目标。
+**Describe a goal（描述目标）**允许在明确选择 AI 提供方后填写自然语言需求；
+否则 Agentic 使用规则推荐，界面会标明当前路径。两者都不代表已经获得实测最优解。
 
-标题使用易读的模型名称，并分别标注模型仓库与集群。生成的部署名称收纳在
-**Deployment target details（部署目标详情）**中，点击 **Change target（更改目标）**可编辑。
-**Deployment configuration（部署配置）**默认展示 **2D optimization flow（2D 优化流程）**。
-请求阶段按顺序连接，优化点关联到其作用阶段，而不是额外的请求跳点。
-聚合部署显示一个 Prefill + Decode 节点，P/D 部署展开独立阶段。
-点击优化点即可在侧栏编辑参数，电源按钮用于启用或禁用。
-已禁用、不可用及受依赖约束的能力仍可查看，并说明原因。
-图形表示计划配置，不是实测流量或实际节点放置；
-可选的 **3D technical view（3D 技术视图）**保留基础设施拓扑。
+资源限制、负载、请求长度和延迟目标默认收起且可选。留空保持未指定，
+重新编辑时已保存的约束会展开显示。**1–3 Walkthrough**逐步突出模式、设置和继续按钮。
+方案中的 **Walkthrough**依次突出方案摘要、服务流程和统一审阅入口。
+引导本身不生成、不修改、不批准方案；Skip 或 Escape 退出，高亮的真实控件仍可操作。
+
+方案标题突出 **Manual plan** 或 **Agentic plan**，同时显示模型和集群。
+**Change setup**返回设置，后端已有方案仍按原模式与目标保存。
+**Serving flow（服务流程）**使用横向 Request → Endpoint selection → Prefill → Decode → Response 主路径。
+聚合服务把两个计算阶段放入同一个 Model server 边界，P/D 使用独立边界。
+缓存索引、KV 缓存、计算配置和服务管理连接到实际作用的阶段。
+这些是逻辑处理与配置关系，不是实时流量或实测放置。
+
+所有功能组默认可见，显示已配置数量与摘要。点击分组，在图中展开内部优化，包括关闭与不可用项；
+每组每页最多四项，展开另一组时收起前一组。点击优化项，直接打开其源码、路由或运行参数配置抽屉。
+展开组内的 **Stage parameters** 可打开副本数等更完整的阶段参数（仅限源码声明的可配置内容）。受支持的开关和详细编辑器沿用现有兼容性检查，不可用项保留只读原因说明。
+不再设置独立 Stage configuration 表格或全局 All settings 可见性开关。
+编辑后先应用并检查资源，再审阅部署；关闭抽屉会保留待应用修改，如需放弃请明确丢弃。
+窄屏可横向滚动图形，可选的 **3D technical view（3D 技术视图）**保留基础设施拓扑。
+
+当前方案不符合目标时，使用 **Refine with Agentic**，选择目标，也可调整已有的负载与限制。
+同一模型、集群和运行参数会带入独立的新建议；精确的源码编辑仍保存在原方案中。
+**Return to previous plan**恢复已保存的方案，不会重新生成。请先应用或丢弃待处理修改。
+新建议仍需资源检查和明确部署确认，不代表性能实测结果。返回历史仅在当前设置页打开期间保留。
+Mock 仅支持目标选择，使用模拟规则。 Prefix caching 和 Chunked prefill 提供 **Enabled / Disabled** 配置及参数预览；点击 **Apply changes** 才更新 Mock 方案与 YAML，**Cancel** 放弃本次编辑。未支持的 Mock 设置保留不可用原因。
 
 **Technical details: source Guides and all parameters（技术详情：源码指南与全部参数）**
 收纳集群固定 llm-d 版本的完整指南索引。
 不可用、外部操作和未适配指南仍显示原因；列在索引中不代表指南或任意组合可以部署。
 已选指南继续展示兼容性选项与源码变量。流程图包含相互独立的前缀亲和路由与精确缓存索引。
-侧栏只显示当前节点的源码、路由或运行参数，包括原生 CPU 缓存每副本容量，选定的变体也可修改。
+配置抽屉只显示当前节点的源码、路由或运行参数，包括原生 CPU 缓存每副本容量，选定的变体也可修改。
 技术详情中的 **All deployment parameters（全部部署参数）**提供完整渲染参数列表及
 **Final YAML（最终 YAML）** 编辑。
 
@@ -53,12 +69,14 @@ Manual 不以负载收益为兼容性门槛，选择兼容的源码优化，同�
 源码版本变化后，
 必须明确选择丢弃源码编辑并采用当前版本，才能继续。
 
-**Deployment summary（部署摘要）**位于全宽设计器下方，集中显示资源需求、规划时可用量、
-缓存、警告和确认操作。请选择模型服务的 **Inference Service（推理服务）**，不要选择 EPP 或
+流程图上方的横向摘要集中显示拓扑、资源、优化数量与校验状态。
+**Review & deploy**在同一个窗口打开 YAML 和 **Deployment summary（部署摘要）**，
+集中显示容量、缓存、警告和 **Confirm deployment** 确认操作。请选择模型服务的 **Inference Service（推理服务）**，不要选择 EPP 或
 指标服务。审批绑定所选端点和准确配置校验和，并重新检查容量；编辑器没有独立部署通道。
 旧计划提供 **Load Guides and build source configuration（加载指南并构建源码配置）**，
 原预览保留在折叠区域。源码目录不可用时显示真实错误，不会用旧模板冒充完整源码组合。
-Agentic 的 **Alternatives（候选方案）**比较已审阅的源码配置及证据。
+折叠的 **More planning tools / optional（更多规划工具，可选）**保留 Agentic 的
+**Alternatives（候选方案）**和 **Benchmark tests（基准测试）**。候选方案比较已审阅的源码配置及证据。
 
 Agentic 提供独立可选的 **Benchmark tests（基准测试）** 视图，在此准备允许测试的计划，
 再选择负载并单独确认执行。加速器上限默认
@@ -76,7 +94,8 @@ QPS 和延迟设置性能目标。留空不增加约束，点击 **Rebuild plan�
 折叠的 **Planning log（规划日志）** 保留诊断事件；Manual 不再显示单独无意义的 **Plan** 导航按钮。
 在成功生成替代方案前保留当前方案；
 **Keep existing plan（保留现有方案）** 返回原方案。新配置修订需要重新审阅。
-**Deploy（部署）**只打开一次针对当前准确配置的确认。确认后，
+**Review & deploy**打开当前准确配置的审阅窗口，点击 **Confirm deployment**提交。
+校验和变化后必须重新审阅。确认后，
 **Deployment execution（部署执行）** 展示 Deploy 实际运行和组件状态、
 尝试次数及失败原因。有执行记录后可以打开 **View Pods & Logs**，也可通过
 **Open deployment** 跳转到已筛选的部署列表，继续监控和评测。
@@ -90,7 +109,7 @@ QPS 和延迟设置性能目标。留空不增加约束，点击 **Rebuild plan�
 2. 在页面标题栏，点击**创建**。
 3. 按[创建部署](/user-guide/model-market)完成操作。提交后，新部署会出现在列表中。
 
-Manual 直接进入部署方案；Agentic 可以先填写目标。不预设请求长度、前缀复用或负载形态，
+Manual 直接进入部署方案；Agentic 先提供目标选项，所有数值参数都可选。不预设请求长度、前缀复用或负载形态，
 这些是收益参考而非兼容性门槛。Agentic 选择 AI 提供方后，
 可从自然语言目标提取明确表达的定性负载特征，提取结果可见、可修改。
 未使用 AI 时依赖结构化输入；数值资源上限和性能目标不会由 AI 推测。
@@ -277,7 +296,7 @@ P/D 的 CPU 缓存适配器目前要求两个角色均使用 `NixlConnector` 和
 通过节点参数按钮或 **All deployment parameters（全部部署参数）**编辑，再点击
 **Apply changes and check resources（应用修改并检查资源）**。Manual 和 Agentic 均保留
 已审阅源码包；编辑器不会悄悄把参数修改交给 LLM 或替换为其他候选。
-只有明确重建负载需求时才请求新推荐。选择候选不是部署，**Deploy（部署）**仍需确认。
+只有明确重建负载需求时才请求新推荐。选择候选不是部署，**Review & deploy**仍需确认。
 
 ## 实测比较 Agentic 候选
 

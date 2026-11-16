@@ -1,8 +1,46 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import yaml from 'js-yaml';
+import { readFileSync } from 'node:fs';
+import { DEPLOYMENT_PREVIEW, mockEnvironmentFromProfiles, createMockDeploymentPlan, checkMockDeployment } from './agenticDeploymentBackend.js';
 import { candidateEvidence, defaultRequirements, DEFAULT_REQUIREMENTS, deploymentPlanningRequest, requirementsFromRun, streamAgenticRecommendation, streamAgenticRefinement } from './agenticDeploymentBackend.js';
 
 const draft = { model: 'test/model', clusterId: 'cluster-a', deploymentName: 'test', storageVolumeId: 'cache-a', contextLength: 40960 };
+const mockProfile = JSON.parse(readFileSync(new URL('../../../../../backend/src/llm_d_lens/hardware/profiles/intel_xpu.json', import.meta.url)));
+const mockDraft = { model: DEPLOYMENT_PREVIEW.model, preview: mockEnvironmentFromProfiles([mockProfile]) };
+
+test('mock uses registered hardware image and resource names without backend writes', t => {
+    t.mock.method(globalThis, 'fetch', () => { throw new Error('Mock planning must not call a backend'); });
+    const plan = createMockDeploymentPlan(mockDraft, 'manual');
+    const [deployment] = yaml.loadAll(plan.yaml);
+    const container = deployment.spec.template.spec.containers[0];
+    assert.equal(container.image, mockProfile.deployment.runtime_image);
+    assert.deepEqual(container.resources.limits, { [mockDraft.preview.resourceName]: 1 });
+    assert.deepEqual(plan.enabled, ['parallel', 'prefix', 'chunked']);
+    assert.match(plan.yaml, /MOCK ONLY/);
+    assert.equal(plan.performance_estimate, undefined);
+    assert.throws(() => mockEnvironmentFromProfiles([]), /profile is unavailable/);
+});
+
+test('mock objectives, edits and capacity checks agree with displayed YAML', () => {
+    for (const [objective, replicas] of [['balanced', 2], ['latency', 1], ['throughput', 4]]) {
+        assert.equal(createMockDeploymentPlan(mockDraft, 'agentic', objective).settings.replicas, replicas);
+    }
+    const plan = createMockDeploymentPlan(mockDraft, 'manual', 'balanced', { replicas: 3, tp: 2, prefixCaching: false, maxModelLen: 8192 });
+    const [deployment] = yaml.loadAll(plan.yaml);
+    assert.equal(deployment.spec.replicas, 3);
+    assert.equal(plan.required, 6);
+    assert.ok(!plan.enabled.includes('prefix'));
+    assert.ok(deployment.spec.template.spec.containers[0].args.includes('--no-enable-prefix-caching'));
+    assert.ok(deployment.spec.template.spec.containers[0].args.includes('8192'));
+    assert.equal(checkMockDeployment(plan, mockDraft.preview).passed, false);
+    const valid = createMockDeploymentPlan(mockDraft, 'manual');
+    assert.equal(checkMockDeployment(valid, mockDraft.preview, 'capacity').passed, false);
+    assert.equal(checkMockDeployment(valid, mockDraft.preview, 'ready').passed, true);
+    assert.throws(() => createMockDeploymentPlan(mockDraft, 'manual', 'balanced', { tp: 3 }), /tp must be/);
+    assert.throws(() => createMockDeploymentPlan(mockDraft, 'manual', 'balanced', { replicas: 1.5 }), /whole number/);
+    assert.throws(() => createMockDeploymentPlan({ ...mockDraft, model: 'another/model' }, 'manual'), /Qwen3-0.6B/);
+});
 test('restoring a saved plan preserves requirements, unknowns and trial limits', () => {
     for (const values of [
         DEFAULT_REQUIREMENTS,

@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useEffectEvent, useRef, useState } from 'react';
-import { ArrowLeft, CheckCircle2, ChevronDown, Circle } from 'lucide-react';
-import { Badge, Button, EmptyState, LoadingState, Modal, ModulePage, Panel, Select, Spinner } from '../../../shared/ui';
+import { ArrowLeft, ArrowRight, CheckCircle2, Download, ChevronDown, Circle } from 'lucide-react';
+import { Badge, Button, EmptyState, LoadingState, Modal, ModulePage, Panel, Select, Spinner, SummaryStrip, Walkthrough, WorkspaceHeader } from '../../../shared/ui';
+import { downloadBlob } from '../../../shared/lib/download';
 import { FormError } from '../../../shared/ui/FormError';
 import { requestJson } from '../../../shared/api/httpClient';
 import { usePolling } from '../../../shared/lib/usePolling';
@@ -10,7 +11,7 @@ import { getLocalDeploymentRun } from '../../optimization';
 import { DeploymentPodsLogsModal } from './DeploymentManagement/DeploymentPodsLogsModal';
 import { formatTimestamp } from '../../../shared/lib/formatTimestamp';
 import { listAIProviders } from '../../ai-providers';
-import { DeploymentRequirementsForm } from './DeploymentRequirementsForm';
+import { DeploymentRequirementsForm, DeploymentRefinementDialog, PlanningProviderSelect } from './DeploymentRequirementsForm';
 import { DeploymentPlanReview } from './DeploymentPlanReview';
 import { MeasuredOptimizationControls } from './MeasuredOptimizationControls';
 import { candidateEvidence, candidateLabel, defaultRequirements, deploymentPlanningRequest, requirementsFromRun, streamAgenticRecommendation } from '../api/agenticDeploymentBackend';
@@ -85,7 +86,7 @@ export function RetrievalEvidenceSources({ run }) {
     });
 }
 
-export function DeploymentSummary({ run, draft, deploymentRun, busy, locked, editing, cleanupRequired, onDeploy, onCheck, onRequirements, onOpen, endpoint, onEndpointChange }) {
+export function DeploymentSummary({ run, draft, deploymentRun, busy, locked, editing, cleanupRequired, onDeploy, onCheck, onRequirements, onOpen, endpoint, onEndpointChange, confirmLabel = 'Deploy' }) {
     const plan = run.configuration_plan;
     const checked = Boolean(plan?.configuration?.content?.officialGuide?.renderedManifest) && plan?.validation?.status === 'resources_checked';
     const submitted = Boolean(run.deployment_run_id);
@@ -95,7 +96,7 @@ export function DeploymentSummary({ run, draft, deploymentRun, busy, locked, edi
         : cleanupRequired ? 'Clean up test resources' : busy ? 'Updating your plan' : editing ? 'Finish editing to continue' : checked ? 'Ready for your confirmation' : 'Resource checks required';
     const candidate = run.selected_candidate;
     const resources = plan?.resource_estimate || {};
-    return <Panel title="Deployment summary" className="min-w-0 shadow-none" aria-label="Deployment summary">
+    return <Panel id="deployment-summary" title="Deployment summary" className="min-w-0 shadow-none" aria-label="Deployment summary">
         <p role="status" className="text-lg font-semibold text-theme-text">{title}</p>
         <p className="mt-2 text-sm leading-relaxed text-theme-muted">{submitted
             ? ready ? 'The serving components report ready. Open the deployment for endpoints, monitoring and evaluation.'
@@ -127,7 +128,7 @@ export function DeploymentSummary({ run, draft, deploymentRun, busy, locked, edi
                 </Select><span className="mt-1 block text-xs text-theme-muted">Choose the model-serving endpoint, not EPP or metrics.</span>
             </label>}
             {submitted ? onOpen && <Button size="md" className="w-full" onClick={onOpen}>Open deployment</Button> : <>
-                <Button size="md" className="w-full" disabled={locked || editing || !plan || (checked && Boolean(plan.source_bundle) && !plan.endpoints?.some(item => item.value === endpoint))} isLoading={busy} onClick={checked ? onDeploy : onCheck}>{checked ? 'Deploy' : 'Retry checks'}</Button>
+                <Button size="md" className="w-full" disabled={locked || editing || !plan || (checked && Boolean(plan.source_bundle) && !plan.endpoints?.some(item => item.value === endpoint))} isLoading={busy} onClick={checked ? onDeploy : onCheck}>{checked ? confirmLabel : 'Retry checks'}</Button>
                 <Button variant="ghost" className="w-full" disabled={locked || editing} onClick={onRequirements}>Workload and limits</Button>
                 <p className="text-xs leading-relaxed text-theme-muted">You will confirm this exact configuration before any deployment starts.</p>
             </>}
@@ -135,12 +136,13 @@ export function DeploymentSummary({ run, draft, deploymentRun, busy, locked, edi
     </Panel>;
 }
 
-export function DeploymentWorkflow({ draft, mode = 'agentic', embedded = false, onBack, onDeploymentStarted }) {
+export function DeploymentWorkflow({ draft, mode = 'agentic', embedded = false, onBack, onDeploymentStarted, onSuggestAgentic, onRestorePlan }) {
     const { can } = useAuth();
     const permitted = can('deployment:run:create');
-    const [run, setRun] = useState(null), [requirements, setRequirements] = useState(() => defaultRequirements(draft?.contextLength));
+    const [run, setRun] = useState(null), [requirements, setRequirements] = useState(() => ({ ...defaultRequirements(), objective: draft?.initialObjective || 'balanced', ...draft?.initialRequirements }));
     const [busy, setBusy] = useState(false), [error, setError] = useState(''), [events, setEvents] = useState([]);
-    const [providers, setProviders] = useState([]), [provider, setProvider] = useState('');
+    const [providers, setProviders] = useState([]), [provider, setProvider] = useState(draft?.initialProvider || '');
+    const [refining, setRefining] = useState(false);
     const [restoring, setRestoring] = useState(true), [approval, setApproval] = useState(null);
     const [editing, setEditing] = useState(false);
     const [endpoint, setEndpoint] = useState('');
@@ -148,11 +150,12 @@ export function DeploymentWorkflow({ draft, mode = 'agentic', embedded = false, 
     const [workspaceView, setWorkspaceView] = useState('review');
     const [changingRequirements, setChangingRequirements] = useState(false);
     const [trialBusy, setTrialBusy] = useState(false);
+    const [tourStep, setTourStep] = useState(null);
     const [deploymentRun, setDeploymentRun] = useState(null), [logsDeployment, setLogsDeployment] = useState(null);
     const requestVersion = useRef(0);
     const abort = useRef(null), mounted = useRef(true);
     const autoStarted = useRef(null);
-    const key = `lens-deployment-plan:${mode}:${draft?.clusterId}:${draft?.model}:${draft?.deploymentName}:${draft?.storageVolumeId}`;
+    const key = `lens-deployment-plan:${mode}:${draft?.clusterId}:${draft?.model}:${draft?.deploymentName}:${draft?.storageVolumeId}${draft?.initialObjective ? `:${draft.initialObjective}` : ''}${draft?.planningAttemptId ? `:${draft.planningAttemptId}` : ''}`;
     useEffect(() => {
         mounted.current = true;
         return () => { mounted.current = false; abort.current?.abort(); };
@@ -161,8 +164,8 @@ export function DeploymentWorkflow({ draft, mode = 'agentic', embedded = false, 
         let active = true;
         requestVersion.current += 1; abort.current?.abort();
         setRun(null); setDeploymentRun(null); setLogsDeployment(null); setApproval(null); setRestoring(true); setBusy(false); setError(''); setEvents([]); setChangingRequirements(false);
-        setRequirements(defaultRequirements(draft?.contextLength)); setProvider('');
-        const id = sessionStorage.getItem(key);
+        setRequirements({ ...defaultRequirements(), objective: draft?.initialObjective || 'balanced', ...draft?.initialRequirements }); setProvider(draft?.initialProvider || '');
+        const id = draft?.resumeRunId || sessionStorage.getItem(key);
         if (!id) { setRestoring(false); return undefined; }
         api(`/api/agentic-deployments/${encodeURIComponent(id)}`).then(value => {
             if (active) {
@@ -174,14 +177,14 @@ export function DeploymentWorkflow({ draft, mode = 'agentic', embedded = false, 
         }).catch(failure => { if (active) setError(`Unable to restore the saved plan: ${failure.message}`); })
             .finally(() => { if (active) setRestoring(false); });
         return () => { active = false; };
-    }, [key, draft?.contextLength, mode]);
+    }, [key, draft?.contextLength, draft?.initialObjective, draft?.initialRequirements, draft?.initialProvider, draft?.resumeRunId, mode]);
     useEffect(() => {
-        if (mode !== 'agentic') return undefined;
+        if (mode !== 'agentic' && !refining) return undefined;
         let active = true;
         listAIProviders().then(items => { if (active) setProviders(items); })
             .catch(failure => { if (active) setError(`Unable to load AI providers: ${failure.message}`); });
         return () => { active = false; };
-    }, [mode]);
+    }, [mode, refining]);
     const accept = value => {
         if (!mounted.current) return;
         setRun(value); setApproval(null); setEndpoint(''); sessionStorage.setItem(key, value.id);
@@ -201,6 +204,7 @@ export function DeploymentWorkflow({ draft, mode = 'agentic', embedded = false, 
     }, { enabled: Boolean(run) && !busy && !trialBusy, intervalMs: active ? 5000 : 15000, immediate: true });
     const generate = async value => {
         const version = ++requestVersion.current;
+        setTourStep(null);
         setBusy(true); setError(''); setApproval(null); setEvents([]);
         const controller = new AbortController();
         abort.current = controller;
@@ -237,13 +241,14 @@ export function DeploymentWorkflow({ draft, mode = 'agentic', embedded = false, 
             return false;
         } finally { if (mounted.current && version === requestVersion.current) { setBusy(false); abort.current = null; } }
     };
-    const startManual = useEffectEvent(() => generate(defaultRequirements()));
+    const autoGenerate = mode === 'manual' || Boolean(draft?.initialObjective);
+    const startPlanning = useEffectEvent(() => generate({ ...defaultRequirements(), objective: draft?.initialObjective || 'balanced', ...draft?.initialRequirements }));
     useEffect(() => {
-        if (mode === 'manual' && !restoring && !run && !error && permitted && autoStarted.current !== key) {
+        if (autoGenerate && !restoring && !run && !error && permitted && autoStarted.current !== key) {
             autoStarted.current = key;
-            startManual();
+            startPlanning();
         }
-    }, [mode, restoring, run, error, permitted, key]);
+    }, [autoGenerate, restoring, run, error, permitted, key]);
     const mutate = async (action, body, checkResources = false) => {
         const version = ++requestVersion.current;
         setBusy(true); setError('');
@@ -273,7 +278,7 @@ export function DeploymentWorkflow({ draft, mode = 'agentic', embedded = false, 
         setBusy(true); setError(''); setApproval(null);
         try {
             const value = await renderDeploymentPlan(run, { editedDraft, compare, profileId });
-            if (mounted.current && version === requestVersion.current) { accept(value); setEditing(false); }
+            if (mounted.current && version === requestVersion.current) { accept(value); setEditing(false); setTourStep(current => current === 3 ? 4 : current); }
             return value;
         } catch (failure) {
             if (mounted.current && version === requestVersion.current) { setError(failure.message); if (failure.profiles) setSourceProfiles(failure.profiles); }
@@ -295,28 +300,44 @@ export function DeploymentWorkflow({ draft, mode = 'agentic', embedded = false, 
         try { const result = await mutate('approve', { configuration_checksum: approval.checksum, ...(plan.source_bundle ? { endpoint: approval.endpoint } : {}) }); if (result?.deployment_run_id) setWorkspaceView('execution'); }
         catch { /* mutate presents the error. */ }
     };
-    const reset = () => { setChangingRequirements(true); setApproval(null); setError(''); setEvents([]); };
+    const reset = () => { setTourStep(null); setChangingRequirements(true); setApproval(null); setError(''); setEvents([]); };
     const plan = run?.configuration_plan;
     const manifest = plan?.configuration?.content?.officialGuide?.renderedManifest || '';
     const checked = Boolean(manifest) && plan?.validation?.status === 'resources_checked';
     const cleanupRequired = ['interrupted', 'cleanup_failed'].includes(run?.optimization?.status);
     const locked = busy || trialBusy || cleanupRequired || active || !permitted || (run && run.status !== 'awaiting_approval');
     const enabled = plan?.decisions?.filter(item => ['enabled', 'dependency'].includes(item.status)) || [];
+    const tourSteps = !run || changingRequirements ? [
+        { target: '#deployment-requirements', title: 'Adjust planning inputs', description: 'Change the objective or optional workload limits, then rebuild the plan.' },
+    ] : [
+        { target: '#deployment-plan-summary', title: 'Read the plan at a glance', description: 'The topology, resource use and validation state are summarized once.' },
+        { target: '#deployment-serving-stages', title: 'Inspect the serving path', description: 'Expand a group and select an optimization to edit it directly. Apply changes and check resources before reviewing.' },
+        { target: '#deployment-review', title: 'Review and confirm', description: 'Review YAML, resource checks and the inference endpoint together. Confirming submits this exact configuration.' },
+    ];
     const content = <section className="space-y-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0"><h2 className="break-words text-2xl font-semibold text-theme-text">{draft.modelTitle || draft.model?.split('/').at(-1) || 'New deployment'}</h2>
-                <dl className="mt-3 flex flex-wrap gap-x-8 gap-y-2 text-sm"><div><dt className="text-theme-muted">Model</dt><dd className="break-all">{draft.model}</dd></div><div><dt className="text-theme-muted">Cluster</dt><dd>{draft.clusterName || draft.clusterId}</dd></div><div><dt className="text-theme-muted">Planning mode</dt><dd>{mode === 'manual' ? 'Manual · compatible optimizations' : 'Agentic · goal-based recommendation'}</dd></div></dl>
-                <details className="mt-3 text-sm text-theme-muted"><summary className="cursor-pointer">Deployment target details</summary><p className="mt-2 break-all">Deployment name: {draft.deploymentName}</p><p className="mt-1">Model cache: {draft.storageVolumeName || draft.storageVolumeId}</p><p className="mt-1">Use Change target to edit the deployment name, cluster or model cache.</p></details>
-            </div>
-            {onBack && <Button variant="secondary" size="sm" disabled={busy || trialBusy || active || editing} onClick={onBack}><ArrowLeft size={14} />Change target</Button>}
-        </div>
+        <WorkspaceHeader title={`${mode === 'manual' ? 'Manual' : 'Agentic'} plan`}
+            eyebrow={draft.modelTitle || draft.model?.split('/').at(-1) || 'New deployment'} subtitle={draft.clusterName || draft.clusterId}
+            backAction={onBack && <Button variant="ghost" size="sm" disabled={busy || trialBusy || active || editing} onClick={onBack}><ArrowLeft size={14} />Change setup</Button>}
+            actions={<>{onRestorePlan && !run?.deployment_run_id && <Button variant="secondary" size="sm" disabled={busy || trialBusy || active || editing || cleanupRequired} onClick={onRestorePlan}>Return to previous plan</Button>}{(!run || plan?.source_bundle) && !run?.deployment_run_id && <Button variant="ghost" size="sm" disabled={restoring || busy || trialBusy || editing} onClick={() => { setWorkspaceView('review'); setTourStep(0); }}>1–3 Walkthrough</Button>}
+                {run?.deployment_run_id ? onDeploymentStarted && <Button onClick={() => onDeploymentStarted(run)}>Open deployment</Button> : run && <Button id="deployment-review" size="md" disabled={locked || editing || !plan} onClick={() => { setTourStep(null); setApproval({ runId: run.id, checksum: plan.configuration?.checksum, endpoint }); }}>Review &amp; deploy<ArrowRight size={15} /></Button>}</>} />
+        {run && <SummaryStrip id="deployment-plan-summary" items={[
+            { label: 'Topology', value: run.selected_candidate?.prefill_replicas ? 'Prefill / Decode' : 'Combined serving', detail: `${run.selected_candidate?.replicas || 1} serving replicas · TP ${run.selected_candidate?.tensor_parallel_size || 1}` },
+            { label: 'Resources', value: `${plan?.resource_estimate?.accelerators ?? '?'} / ${plan?.resource_estimate?.available_accelerators ?? '?'} accelerators` },
+            { label: 'Optimizations', value: `${enabled.length} configured`, detail: mode === 'manual' ? 'Compatible source settings' : requirements.objective },
+            { label: 'Validation', value: editing ? 'Unapplied changes' : checked ? 'Ready for review' : 'Checks pending', detail: 'Performance not benchmarked' },
+        ]} />}
+        <DeploymentRefinementDialog available={Boolean(run && !run.deployment_run_id && !changingRequirements && onSuggestAgentic)} disabled={locked} editing={editing} onOpen={() => { setTourStep(null); setRefining(true); }} isOpen={refining} onClose={() => setRefining(false)} requirements={requirements} runtime={run?.request} resourceEstimate={plan?.resource_estimate}
+            provider={provider} providers={providers} onProviderChange={setProvider} onSubmit={values => {
+                if (locked || editing || !run) return;
+                onSuggestAgentic?.({ requirements: values, provider, runId: run.id, runtime: {
+                    contextLength: run.request.max_model_len, gpuMemoryUtilization: run.request.gpu_memory_utilization,
+                    maxNumSeqs: run.request.max_num_seqs, maxNumBatchedTokens: run.request.max_num_batched_tokens,
+                } });
+            }} />
         {error && <div className="space-y-2"><p className="text-sm font-semibold text-theme-text">{run?.deployment_run_id ? 'Deployment update needs attention' : run ? 'Your saved plan is preserved' : 'Unable to prepare the deployment plan'}</p><FormError message={error} /><p className="text-sm text-theme-muted">{run?.deployment_run_id ? 'The deployment may still be running. Check its execution status before taking further action.' : run ? 'Review the message, retry resource checks or adjust the workload and limits. No deployment starts without confirmation.' : 'Check the target and inputs, then build the plan again.'}</p></div>}
         {!permitted && <EmptyState title="Deployment permission required" message="Ask an administrator for deployment-create access to this cluster." />}
-        {restoring ? <LoadingState label="Restoring deployment plan" /> : ((!run && (mode === 'agentic' || (!busy && error))) || changingRequirements) && <DeploymentRequirementsForm mode={mode} initialValue={requirements} runtime={run?.request} resourceEstimate={plan?.resource_estimate} onSubmit={generate} disabled={busy || !permitted}>
-            <label className="block text-sm">AI provider<Select className="mt-1" value={provider} onChange={event => setProvider(event.target.value)}>
-                <option value="">Rule-based recommendations (no AI)</option>
-                {providers.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
-            </Select><span className="mt-2 block text-xs text-theme-muted">Natural-language goals require an AI provider. Rules use the structured traffic and limits.</span></label>
+        {restoring ? <LoadingState label="Restoring deployment plan" /> : ((!run && ((!autoGenerate && mode === 'agentic') || (!busy && error))) || changingRequirements) && <DeploymentRequirementsForm mode={mode} initialValue={requirements} runtime={run?.request} resourceEstimate={plan?.resource_estimate} onSubmit={generate} disabled={busy || !permitted} aiProviderConfigured={Boolean(provider)}>
+            <PlanningProviderSelect provider={provider} providers={providers} onChange={setProvider} />
         </DeploymentRequirementsForm>}
         {changingRequirements && <Button variant="secondary" disabled={busy} onClick={() => { setRequirements(requirementsFromRun(run)); setProvider(run.request.ai_provider_id || ''); setChangingRequirements(false); }}>Keep existing plan</Button>}
         {events.length > 0 && <div className="text-sm">
@@ -334,9 +355,9 @@ export function DeploymentWorkflow({ draft, mode = 'agentic', embedded = false, 
         {run && !changingRequirements && <>
             {run.request.requirements?.workload?.interpretationSource === 'ai_goal' && <p className="text-sm text-theme-muted">AI workload interpretation: shared prompts {run.request.requirements.workload.prefixReuse == null ? 'unknown' : run.request.requirements.workload.prefixReuse ? 'yes' : 'no'}; long inputs with short answers {run.request.requirements.workload.prefillHeavy == null ? 'unknown' : run.request.requirements.workload.prefillHeavy ? 'yes' : 'no'}. Correct these in Deployment settings.</p>}
             {cleanupRequired && <Panel title="Test resources require cleanup"><p role="alert" className="text-sm">Resolve the interrupted or failed cleanup in Real benchmark tests before revising or deploying this plan.</p><Button className="mt-3" variant="secondary" disabled={busy || trialBusy || editing} onClick={() => setWorkspaceView('trials')}>Open test cleanup</Button></Panel>}
-            {(mode === 'agentic' || run.deployment_run_id) && <nav className="flex flex-wrap gap-2" aria-label="Planning workspace">
+            {(mode === 'agentic' || run.deployment_run_id) && <details open={workspaceView !== 'review' || Boolean(run.deployment_run_id)}><summary className="cursor-pointer text-sm text-theme-muted">{run.deployment_run_id ? 'Deployment views' : 'More planning tools / optional'}</summary><nav className="mt-3 flex flex-wrap gap-2" aria-label="Planning workspace">
                 {[["review", run.deployment_run_id ? 'Submitted plan' : 'Plan'], ...(mode === 'agentic' && !run.deployment_run_id && run.candidates.length > 1 ? [["compare", 'Alternatives']] : []), ...(mode === 'agentic' && (!run.deployment_run_id || run.optimization) ? [["trials", 'Benchmark tests']] : []), ...(run.deployment_run_id ? [["execution", 'Deployment execution']] : [])].map(([id, label]) => <Button key={id} variant={workspaceView === id ? 'secondary' : 'ghost'} aria-pressed={workspaceView === id} disabled={editing || busy || trialBusy} onClick={() => setWorkspaceView(id)}>{label}</Button>)}
-            </nav>}
+            </nav></details>}
             <div className="grid min-w-0 items-start gap-5">
             <div className="min-w-0 space-y-4">
             {workspaceView === 'review' && (plan?.source_bundle && plan.source_draft
@@ -385,20 +406,20 @@ export function DeploymentWorkflow({ draft, mode = 'agentic', embedded = false, 
             </Panel>}
             {mode === 'agentic' && (run.request.execution_policy.allow_trials || run.optimization) && <div hidden={workspaceView !== 'trials'}><MeasuredOptimizationControls key={run.id} onBusyChange={setTrialBusy} run={run} onUpdate={value => { requestVersion.current += 1; accept(value); }} onReview={choose} onCheckCandidates={async () => { try { await renderSource({ compare: true }); } catch { /* Workflow reports source errors. */ } }} disabled={busy || !permitted || editing} /></div>}
             </div>
-            {['review', 'execution'].includes(workspaceView) && <aside className="min-w-0"><DeploymentSummary run={run} draft={draft} deploymentRun={deploymentRun} busy={busy} locked={locked} editing={editing} cleanupRequired={cleanupRequired} endpoint={endpoint} onEndpointChange={value => { setEndpoint(value); setApproval(null); }} onDeploy={() => setApproval({ runId: run.id, checksum: plan.configuration.checksum, endpoint })} onCheck={render} onRequirements={reset} onOpen={onDeploymentStarted ? () => onDeploymentStarted(run) : undefined} /></aside>}
+
             </div>
         </>}
-        <Modal isOpen={Boolean(approval)} onClose={() => setApproval(null)} closeOnBackdrop={!busy} closeOnEscape={!busy} title="Deploy this configuration?" size="sm" footer={<>
-            <Button variant="secondary" disabled={busy} onClick={() => setApproval(null)}>Cancel</Button>
-            <Button isLoading={busy} disabled={locked || editing || !checked || approval?.checksum !== plan?.configuration?.checksum} onClick={deploy}>Confirm deployment</Button>
-        </>}>
-            <p className="text-sm">{draft.deploymentName} on {draft.clusterName || draft.clusterId}</p>
-            {approval?.endpoint && <p className="mt-2 break-all text-sm">Inference Service: {approval.endpoint}</p>}
-            <p className="mt-2 text-sm text-theme-muted">{plan?.resource_estimate?.accelerators} accelerators / {enabled.length} optimizations. This submits the displayed configuration after a fresh capacity check.</p>
-            {plan?.decisions?.some(item => ['unsupported', 'resource_limited', 'conflict'].includes(item.status)) && <p className="mt-2 text-sm">Some optimizations cannot be included. Review the Guide availability reasons before confirming.</p>}
+        <Modal isOpen={Boolean(approval)} onClose={() => setApproval(null)} closeOnBackdrop={!busy} closeOnEscape={!busy} title="Review & deploy" size="xl" footer={manifest && <Button variant="secondary" onClick={() => downloadBlob(new Blob([manifest], { type: 'text/yaml' }), `${draft.deploymentName}.yaml`)}><Download size={15} />Download YAML</Button>}>
+            {run && <div className="grid items-start gap-5 md:grid-cols-[minmax(0,1fr)_300px]">
+                <section className="min-w-0"><h3 className="mb-3 text-sm font-semibold">Generated configuration</h3><pre className="max-h-[65vh] overflow-auto rounded-lg bg-theme-bg p-4 text-xs">{manifest || 'Generate and check the source configuration first.'}</pre></section>
+                <DeploymentSummary run={run} draft={draft} deploymentRun={deploymentRun} busy={busy} locked={locked || approval?.checksum !== plan?.configuration?.checksum} editing={editing} cleanupRequired={cleanupRequired} endpoint={endpoint}
+                    onEndpointChange={value => { setEndpoint(value); setApproval(current => current ? { ...current, endpoint: value } : null); }}
+                    onDeploy={deploy} confirmLabel="Confirm deployment" onCheck={render} onRequirements={reset} />
+            </div>}
             {error && <p role="alert" className="mt-3 text-sm">{error}</p>}
         </Modal>
         {logsDeployment && <DeploymentPodsLogsModal deployment={logsDeployment} onClose={() => setLogsDeployment(null)} />}
+        <Walkthrough steps={tourSteps} step={tourStep} onStepChange={setTourStep} onClose={() => setTourStep(null)} />
     </section>;
     return embedded ? content : <ModulePage>{content}</ModulePage>;
 }

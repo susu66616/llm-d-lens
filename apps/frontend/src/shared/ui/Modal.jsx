@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { cn } from '../lib/cn';
+import { Button } from './Button';
 
 const SIZES = {
     sm: 'max-w-md',
@@ -141,4 +142,78 @@ export function Modal({
         content,
         document.body
     );
+}
+
+/** A non-modal guide: the highlighted real controls remain operable. */
+export function Walkthrough({ steps, step, onStepChange, onClose }) {
+    const [position, setPosition] = useState(null);
+    const card = useRef(null), previousFocus = useRef(null);
+    const current = step == null ? null : steps[step];
+    const targetSelector = current?.target;
+    const open = Boolean(current);
+    useEffect(() => {
+        if (!open) return undefined;
+        previousFocus.current = document.activeElement;
+        return () => { if (previousFocus.current?.isConnected) previousFocus.current.focus(); };
+    }, [open]);
+    useEffect(() => {
+        if (!targetSelector) return undefined;
+        const target = document.querySelector(targetSelector);
+        target?.scrollIntoView({ block: 'center', behavior: 'instant' });
+        let frame;
+        const measure = () => {
+            const rect = target?.getBoundingClientRect();
+            const w = window.innerWidth, h = window.innerHeight;
+            const left = Math.max(0, Math.min(w, (rect?.left ?? 16) - 6));
+            const right = Math.max(left, Math.min(w, (rect?.right ?? w - 16) + 6));
+            const top = Math.max(0, Math.min(h, (rect?.top ?? 16) - 6));
+            const bottom = Math.max(top, Math.min(h, (rect?.bottom ?? 16) + 6));
+            const width = Math.min(340, w - 24), height = card.current?.offsetHeight || 230;
+            const x = w - right >= width + 24 ? right + 12 : left >= width + 24 ? left - width - 12 : Math.min(left, w - width - 12);
+            const y = bottom + height + 24 <= h ? bottom + 12 : top > height + 24 ? top - height - 12 : Math.max(12, h - height - 12);
+            setPosition({ left, right, top, bottom, w, h, x: Math.max(12, x), y, width });
+        };
+        const update = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(measure); };
+        measure();
+        card.current?.focus();
+        window.addEventListener('resize', update);
+        window.addEventListener('scroll', update, true);
+        const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update);
+        if (target) observer?.observe(target);
+        if (card.current) observer?.observe(card.current);
+        return () => { cancelAnimationFrame(frame); observer?.disconnect(); window.removeEventListener('resize', update); window.removeEventListener('scroll', update, true); };
+    }, [targetSelector]);
+    useEffect(() => {
+        if (!open) return undefined;
+        const keyboard = event => {
+            if (event.key === 'Escape') { event.stopPropagation(); onClose(); return; }
+            if (event.key !== 'Tab') return;
+            const target = document.querySelector(targetSelector);
+            const selectors = 'button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled),textarea:not(:disabled),summary';
+            const controls = [...(target?.querySelectorAll(selectors) || []), ...(card.current?.querySelectorAll(selectors) || [])].filter(el => el.getClientRects().length);
+            if (!controls.length) return;
+            if (!controls.includes(document.activeElement) || (event.shiftKey && document.activeElement === controls[0]) || (!event.shiftKey && document.activeElement === controls.at(-1))) {
+                event.preventDefault(); (event.shiftKey ? controls.at(-1) : controls[0]).focus();
+            }
+        };
+        window.addEventListener('keydown', keyboard, true);
+        return () => window.removeEventListener('keydown', keyboard, true);
+    }, [open, targetSelector, onClose]);
+    if (!current || typeof document === 'undefined') return null;
+    const p = position;
+    return createPortal(<div className="pointer-events-none fixed inset-0 z-[210]" aria-label="Guided walkthrough">
+        {p && <>
+            {[
+                { left: 0, top: 0, width: p.w, height: p.top },
+                { left: 0, top: p.top, width: p.left, height: p.bottom - p.top },
+                { left: p.right, top: p.top, width: p.w - p.right, height: p.bottom - p.top },
+                { left: 0, top: p.bottom, width: p.w, height: p.h - p.bottom },
+            ].map((style, index) => <div key={index} aria-hidden="true" className="pointer-events-auto absolute bg-black/60" style={style} />)}
+            <div aria-hidden="true" className="absolute rounded-lg ring-2 ring-[var(--brand-accent)]" style={{ left: p.left, top: p.top, width: p.right - p.left, height: p.bottom - p.top }} />
+        </>}
+        <section ref={card} tabIndex={-1} role="dialog" aria-modal="false" aria-label={`Step ${step + 1}: ${current.title}`} className="pointer-events-auto absolute max-h-[calc(100dvh-24px)] overflow-auto rounded-xl border border-theme-border bg-theme-card p-4 text-theme-text shadow-2xl" style={{ left: p?.x ?? 12, top: p?.y ?? 12, width: p?.width ?? 320 }}>
+            <p className="text-xs font-medium text-theme-muted">{step + 1} / {steps.length}</p><h3 className="mt-2 text-base font-semibold">{current.title}</h3><p className="mt-2 text-sm text-theme-muted">{current.description}</p>
+            <div className="mt-4 flex items-center justify-between gap-2"><Button type="button" variant="ghost" onClick={onClose}>Skip</Button><div className="flex gap-2"><Button type="button" variant="secondary" disabled={step === 0} onClick={() => onStepChange(step - 1)}>Back</Button><Button type="button" onClick={() => step + 1 === steps.length ? onClose() : onStepChange(step + 1)}>{step + 1 === steps.length ? 'Finish' : 'Next'}</Button></div></div>
+        </section>
+    </div>, document.body);
 }

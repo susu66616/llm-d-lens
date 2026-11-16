@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createBlueprint } from './blueprint.js';
-import { inferenceScene, sceneRelations, optimizationFlowPlan } from './sceneGraph.js';
+import { inferenceScene, sceneRelations, optimizationFlowPlan, servingStageGroups, servingFlowDiagram } from './sceneGraph.js';
 
 test('optimizations belong to a module or a relationship; they are not request stages', () => {
     const graph = inferenceScene(createBlueprint());
@@ -116,5 +116,100 @@ test('dense source catalogs keep preview markers inside tiles without losing sel
     }
     for (const tier of graph.tiers) {
         assert.ok(new Set(graph.nodes.filter(item => item.tier === tier.id).map(item => item.colorIndex)).size > 1);
+    }
+});
+
+test('stage disclosure accounts for every source capability in combined and P/D plans', () => {
+    for (const pd of [false, true]) {
+        const graph = inferenceScene({ ...createBlueprint(), pd, sourceGuides: [{ id: 'new-source-addon', title: 'New source addon', hasAssets: true }] });
+        const groups = servingStageGroups(graph);
+        assert.deepEqual(new Set(groups.flatMap(group => group.capabilities.map(cap => cap.id))), new Set(graph.capabilities.map(cap => cap.id)));
+        assert.equal(groups.filter(group => group.primary).length, pd ? 3 : 2);
+        const platform = groups.find(group => group.id === 'pods');
+        assert.ok(platform.capabilities.some(cap => cap.id === 'scaling'));
+        assert.ok(platform.capabilities.some(cap => cap.id === 'guide:new-source-addon'));
+        assert.ok(!groups.find(group => group.id === 'routing').capabilities.some(cap => cap.id === 'cache'));
+        for (const group of groups) assert.equal(new Set(group.capabilities.map(cap => cap.id)).size, group.capabilities.length);
+    }
+});
+
+test('shared KV settings attach to both compute roles without becoming request stages', () => {
+    const graph = inferenceScene({ ...createBlueprint(), pd: true });
+    const groups = servingStageGroups(graph);
+    for (const id of ['prefill', 'decode']) {
+        const cache = groups.find(group => group.id === id).capabilities.find(cap => cap.id === 'cache');
+        assert.deepEqual(cache.stages, ['prefill', 'decode']);
+        assert.equal(cache.enabled, false);
+        assert.equal(cache.kind, 'Optimization');
+    }
+    assert.ok(!groups.some(group => group.id === 'cache'));
+    assert.ok(!groups.find(group => group.id === 'prefill').capabilities.some(cap => cap.id === 'speculation'));
+});
+
+
+test('compact overview accounts for every optimization exactly once and keeps them off the request path', () => {
+    const graph = inferenceScene({ ...createBlueprint(), prefixCaching: 'enabled', chunkedPrefill: 'enabled' });
+    const diagram = servingFlowDiagram(graph);
+    assert.equal(diagram.nodes.length, 9);
+    assert.ok(diagram.height < 720);
+    const ids = diagram.groups.flatMap(group => group.capabilities.map(cap => cap.id));
+    assert.equal(ids.length, new Set(ids).size);
+    assert.deepEqual(new Set(ids), new Set(graph.capabilities.map(cap => cap.id)));
+    assert.equal(diagram.groups.reduce((sum, group) => sum + group.capabilities.filter(cap => cap.enabled).length, 0), diagram.configuredCount);
+    assert.equal(diagram.regions.length, 1);
+    assert.equal(diagram.edges.find(edge => edge.from === 'prefill' && edge.to === 'decode').label, 'KV cache');
+    const prefill = servingFlowDiagram(graph, {}, () => true, { expandedGroup: 'prefill' });
+    assert.deepEqual(prefill.edges.filter(edge => edge.from === 'prefix').map(edge => edge.to), ['prefill']);
+    const compute = servingFlowDiagram(graph, {}, () => true, { expandedGroup: 'compute-settings' });
+    assert.deepEqual(compute.edges.filter(edge => edge.from === 'parallel').map(edge => edge.to), ['prefill', 'decode']);
+});
+
+test('expansion reveals inactive entries and shared KV relationships, including source-defined entries', () => {
+    const graph = inferenceScene({ ...createBlueprint(), pd: true, sourceGuides: [{ id: 'custom-operation', title: 'Custom operation', hasAssets: true }] });
+    const plan = servingFlowDiagram(graph, {}, () => true, { expandedGroup: 'kv-settings' });
+    assert.equal(plan.nodes.find(node => node.id === 'cache').enabled, false);
+    assert.equal(plan.edges.filter(edge => edge.from === 'cache' && edge.pending).length, 2);
+    assert.equal(plan.regions.length, 2);
+    assert.equal(plan.edges.find(edge => edge.from === 'prefill' && edge.to === 'decode').label, 'KV transfer');
+    const group = plan.groups.find(group => group.capabilities.some(cap => cap.id === 'guide:custom-operation'));
+    assert.ok(group);
+    const page = Math.floor(group.capabilities.findIndex(cap => cap.id === 'guide:custom-operation') / 4);
+    const expanded = servingFlowDiagram(graph, {}, () => true, { expandedGroup: group.id, pages: { [group.id]: page } });
+    assert.ok(expanded.nodes.some(node => node.id === 'guide:custom-operation'));
+    assert.ok(expanded.edges.every(edge => edge.kind !== 'dependency'));
+});
+
+test('every page remains bounded with contained rows, no card collisions and unobstructed connectors', () => {
+    const graph = inferenceScene({ ...createBlueprint(), pd: true, sourceGuides: Array.from({ length: 40 }, (_, i) => ({ id: `extra-${i}`, title: `A long deployment recipe title for configuration ${i}`, hasAssets: true })) });
+    const overview = servingFlowDiagram(graph);
+    for (const group of overview.groups) {
+        const discovered = new Set();
+        for (let page = 0; page < group.totalPages; page++) {
+            const plan = servingFlowDiagram(graph, {}, () => true, { expandedGroup: group.id, pages: { [group.id]: page } });
+            assert.ok(plan.height < 1150, `${group.id} is unbounded`);
+            const rows = plan.nodes.filter(node => node.capability);
+            assert.ok(rows.length <= 4);
+            for (const row of rows) {
+                discovered.add(row.id);
+                const parent = plan.nodes.find(node => node.id === row.parentId);
+                assert.ok(row.y - row.height / 2 >= parent.y - parent.height / 2 + parent.headerHeight);
+                assert.ok(row.y + row.height / 2 < parent.y + parent.height / 2);
+            }
+            for (const [i, node] of plan.nodes.entries()) {
+                assert.ok(node.x - node.width / 2 >= 0 && node.x + node.width / 2 <= plan.width, node.id);
+                assert.ok(node.y - node.height / 2 >= 0 && node.y + node.height / 2 <= plan.height, node.id);
+                for (const other of plan.nodes.slice(i + 1).filter(other => other.parentId !== node.id && node.parentId !== other.id)) assert.ok(Math.abs(node.x - other.x) >= (node.width + other.width) / 2 || Math.abs(node.y - other.y) >= (node.height + other.height) / 2, `${node.id} overlaps ${other.id}`);
+            }
+            for (const edge of plan.edges.filter(edge => edge.points)) for (let i = 1; i < edge.points.length; i++) {
+                const [a, b] = [edge.points[i - 1], edge.points[i]];
+                for (const node of plan.nodes.filter(node => node.id !== edge.from && node.id !== edge.to && node.parentId !== edge.from && node.parentId !== edge.to)) {
+                    assert.ok(Math.max(a[0], b[0]) <= node.x - node.width / 2 || Math.min(a[0], b[0]) >= node.x + node.width / 2 || Math.max(a[1], b[1]) <= node.y - node.height / 2 || Math.min(a[1], b[1]) >= node.y + node.height / 2, `${edge.from}–${edge.to} crosses ${node.id}`);
+                }
+            }
+            for (const edge of plan.edges.filter(edge => !edge.hidden && edge.label && !edge.labelOnSelect)) for (const node of plan.nodes) {
+                assert.ok(Math.abs(edge.labelX - node.x) >= (edge.labelWidth + node.width) / 2 || Math.abs(edge.labelY - node.y) >= 12 + node.height / 2, `${edge.label} intersects ${node.id}`);
+            }
+        }
+        assert.deepEqual(discovered, new Set(group.capabilities.map(cap => cap.id)));
     }
 });

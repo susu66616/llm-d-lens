@@ -10,8 +10,8 @@ description: 根据需求创建 Manual 或 Agentic 部署，在审批前审阅�
 
 | 模式 | 决策规则 |
 | --- | --- |
-| **Compatible optimizations（兼容优化优先，Manual）** | 自动组合适用且已支持的优化，优先源码验证后的覆盖范围；无偏好时以较少资源打破平局，不调用 LLM。 |
-| **Goal-based recommendation（按目标推荐，Agentic）** | 根据目标、负载和可用证据比较经过校验的候选；显式选择的 AI 提供方可以提出候选并排序，回退情况会明确标注。 |
+| **Manual** | 自动组合适用且已支持的优化，优先源码验证后的覆盖范围；无偏好时以较少资源打破平局，不调用 LLM。 |
+| **Agentic** | 根据目标、负载和可用证据比较经过校验的候选；显式选择的 AI 提供方可以提出候选并排序，回退情况会明确标注。 |
 
 两者共用 **Target（目标）→ Deployment plan（部署方案）→ Deploy and observe（部署与观察）**。
 API 模式名仍为 `manual` 和 `agentic`。
@@ -22,16 +22,33 @@ API 模式名仍为 `manual` 和 `agentic`。
 
 ## 选择目标
 
-1. 选择模型和就绪的 **Cluster（集群）**。Lens 自动生成部署名称，
-   编辑 **Deployment name（部署名称）**可修改；创建流程不再提供备注。
-2. **Model files（模型文件）**显示所选缓存中的模型是否就绪，展开缓存选择器可更换
-   **Model cache storage（模型缓存存储）**。两种模式都需要已注册且就绪的模型缓存。
-3. 选择 **Compatible optimizations**，点击 **Build deployment plan（生成部署方案）**直接构建；
-   或选择 **Goal-based recommendation**，点击 **Continue to deployment goals（继续配置部署目标）**。
+1. 选择模型后，先选择醒目的 **Manual** 或 **Agentic** 卡片。
+2. 查看简洁的环境卡：有就绪集群时自动预选，部署名称自动生成。
+   **Change setup**将集群、名称和模型缓存控件集中在弹窗内。
+   没有集群时可选择真实环境，或点击 **Try Intel XPU mock**。
+3. Manual 在当前页展示兼容默认方案；Agentic 在同一页提供 Balanced、
+   Low latency、High throughput 目标。点击 **Build Manual plan** 或
+   **Build Agentic plan**直接进入生成的方案，无需填写数值参数。
+   **1–3 Walkthrough**通过遮罩逐步引导这些控件。
 
-模型缺失时，使用 **Prepare model files（准备模型文件）**；已就绪时可使用 **Manage model cache（管理模型缓存）**。
-通过 **Back to model（返回模型）**返回时保留模型、名称和策略，并重新检查可用性。
+模型文件缺失时使用 **Prepare model cache**。
 参阅[模型缓存](/user-guide/model-cache)和[存储](/user-guide/storage)。
+
+### 无硬件体验
+
+**Try Intel XPU mock**预置 Qwen3-0.6B、两个模拟节点、四张 Intel Arc Pro B60
+（每张 24 GiB）和就绪的模拟缓存。镜像与设备资源名称来自已注册硬件 profile，
+不会创建集群或缓存记录。Manual 直接生成示例方案；Agentic 只需选择一个目标，
+使用明确标注的演示规则。两种模式都不调用 AI 提供方、不预测性能。
+
+按 **Serving flow → expand a group → configure a setting → Review & simulate** 体验：点击阶段查看优化，切换前缀缓存
+或分块预填充，修改副本数、TP 和引擎限制，查看或下载同步变化的模型服务器 YAML 片段。
+此 Mock 覆盖三个引擎设置，不代表所有 Guide 或完整 llm-d 部署包。
+审阅窗口集中展示 YAML、检查结果及折叠的 **Mock scenario** 选择器，
+点击 **Confirm simulation**开始模拟。请求关系图复用真实规划器的逻辑视图，不表示已验证的 Mock 路由安装。
+**Insufficient capacity**会阻止模拟部署；**Restore mock capacity**恢复就绪场景。
+确认后展示三个本地模拟启动状态，不发送部署 API 请求。
+**Use a real cluster**退出预览；**1–3 Walkthrough**提供分步遮罩。
 
 初始上下文长度使用模型卡片的准确 `contextLength`，仅缺失时使用 `4096`。
 支持范围为 `256` 到 `1048576`，不会静默缩短。运行镜像来自目标硬件 profile。
@@ -39,17 +56,17 @@ API 模式名仍为 `manual` 和 `agentic`。
 
 ## 填写需求
 
-点击 **Build deployment plan（生成部署方案）**，无需选择 Guide 或部署方式。
-可选的 **Workload and constraints（负载与约束）**记录请求长度、并发或 QPS、延迟目标和
+点击 **Build Manual plan** 或 **Build Agentic plan**，无需选择 Guide。
+默认折叠的可选分组记录请求长度、并发或 QPS、延迟目标和
 加速器使用上限，全部默认未指定。模型上下文不代表真实请求长度，平均输入与 P95 独立。
 后端自动发现硬件并选择运行参数。
 
-Manual 无需负载问卷，也不调用 LLM。Agentic 优先显示结构化限制；
-展开 **AI assistance（AI 辅助）**并显式选择 AI 提供方后可填写自然语言目标，已有目标会保持该区域展开。
+Manual 无需负载问卷，也不调用 LLM。Agentic 优先显示目标选项；
+展开 **Describe a goal（描述目标）**并显式选择 AI 提供方后可填写自然语言目标，已有目标会保持该区域展开。
 仅提取明确表达的定性负载特征，显示提取结果，且结构化值优先于 AI 推断。
 数值限制不会自动推测。未选择 AI 时使用结构化输入和规则推荐。
 未知或预期较低的复用率不会阻止技术兼容的优化组合。
-默认取舍为 **No preference（无偏好）**，不是吞吐优先。历史输入保持原样。
+默认取舍为 **Balanced（均衡）**，不是吞吐优先。历史输入保持原样。
 Agentic 默认保留三个推荐，规划截止时间为 60 分钟，不自动执行实测。
 
 后端强制执行加速器上限和必须 / 禁止的机制。实际空闲资源始终优先。
@@ -73,16 +90,29 @@ Manual 保留不同已支持能力族用于源码检查。两种模式都独立�
 
 ## 审阅与编辑
 
-- 标题使用易读的模型名称，并分别标注模型仓库和集群。生成的名称收纳在
-  **Deployment target details（部署目标详情）**中，点击 **Change target（更改目标）**可编辑。
-- 共用工作台默认展示 **2D optimization flow（2D 优化流程）**。优化点关联到作用阶段；
-  聚合部署使用一个 Prefill + Decode 节点。点击节点在侧栏编辑参数，电源按钮用于启用或禁用。
-  不支持及受依赖约束的节点说明限制原因。图形表示配置，而非实测性能。
-  **3D technical view（3D 技术视图）**为可选入口，资源与确认摘要仍在下方。
+- 单一标题显示 **Manual plan** 或 **Agentic plan**、模型和集群。
+  **Change setup**返回环境和部署名称设置。横向摘要集中显示拓扑、资源、优化数量和校验状态。
+- **Serving flow（服务流程）**使用横向 Request → Endpoint selection → Prefill → Decode → Response 主路径。
+  聚合服务把两个计算阶段放入同一个 Model server 边界，P/D 使用独立边界。
+  缓存索引、KV 缓存、计算配置和服务管理连接到实际作用的阶段。
+  这些是逻辑处理与配置关系，不是实时流量或实测放置。
+
+  所有功能组默认可见，显示已配置数量与摘要。点击分组，在图中展开内部优化，包括关闭与不可用项；
+  每组每页最多四项，展开另一组时收起前一组。点击优化项，直接打开其源码、路由或运行参数配置抽屉。
+  展开组内的 **Stage parameters** 可打开副本数等更完整的阶段参数（仅限源码声明的可配置内容）。受支持的开关和详细编辑器沿用现有兼容性检查，不可用项保留只读原因说明。
+  不再设置独立 Stage configuration 表格或全局 All settings 可见性开关。
+  编辑后先应用并检查资源，再审阅部署；关闭抽屉会保留待应用修改，如需放弃请明确丢弃。
+  窄屏可横向滚动图形，可选的 **3D technical view（3D 技术视图）**保留基础设施拓扑。
+
+  当前方案不符合目标时，使用 **Refine with Agentic**，选择目标，也可调整已有的负载与限制。
+  同一模型、集群和运行参数会带入独立的新建议；精确的源码编辑仍保存在原方案中。
+  **Return to previous plan**恢复已保存的方案，不会重新生成。请先应用或丢弃待处理修改。
+  新建议仍需资源检查和明确部署确认，不代表性能实测结果。返回历史仅在当前设置页打开期间保留。
+  Mock 仅支持目标选择，使用模拟规则。 Prefix caching 和 Chunked prefill 提供 **Enabled / Disabled** 配置及参数预览；点击 **Apply changes** 才更新 Mock 方案与 YAML，**Cancel** 放弃本次编辑。未支持的 Mock 设置保留不可用原因。
 - **Technical details: source Guides and all parameters（技术详情：源码指南与全部参数）**
   收纳固定版本的完整指南索引，包括不支持项及原因。已选指南保留兼容性选项和变量。
   前缀亲和路由与精确索引仍是独立优化点。
-- 侧栏只编辑当前节点的源码、路由或运行参数。技术详情提供
+- 点击优化项从图中打开源码、路由或运行参数抽屉；可选的 3D 视图保留侧栏。技术详情提供
   **All deployment parameters（全部部署参数）**及 **Final YAML（最终 YAML）**。
   切换优化会保留不相关的最终编辑；冲突时阻止应用，不会静默丢弃。
   请撤销冲突，或明确丢弃最终参数编辑。旧快照缺少编辑基线时，基础配置变化需要明确处理。
@@ -95,7 +125,8 @@ Manual 保留不同已支持能力族用于源码检查。两种模式都独立�
 源码加载失败时展示真实原因并可重试。旧运行可通过
 **Load Guides and build source configuration（加载指南并构建源码配置）**升级，不局限于原预览。
 源码版本变化时，必须明确采用新版本后再应用编辑。**Workload and limits（负载与限制）**
-仍可重建需求而不修改运行中部署。Agentic 的 **Alternatives（候选方案）**比较已审阅源码配置，
+仍可重建需求而不修改运行中部署。折叠的 **More planning tools / optional（更多规划工具，可选）**保留 Agentic 的
+**Alternatives（候选方案）**和 **Benchmark tests（基准测试）**。候选方案比较已审阅源码配置，
 不会宣称未测量的性能。
 
 ## 生成、检查与部署
@@ -106,8 +137,9 @@ Manual 保留不同已支持能力族用于源码检查。两种模式都独立�
    用户显式选择的候选不会被悄悄替换。
 2. 审阅警告、依赖和待检查项。渲染不会安装资源；集群准入、运行就绪和负载性能仍待验证。
 3. 选择已审阅的模型 **Inference Service（推理服务）**，不要选择 EPP 或指标服务。
-   **Ready for your confirmation（等待确认）**给出结论。点击 **Deploy（部署）**，
-   确认当前准确配置的校验和与所选端点。
+   **Review & deploy**集中打开 YAML 和检查结果，**Ready for your confirmation（等待确认）**
+   给出结论。点击 **Confirm deployment**确认当前准确配置的校验和与所选端点。
+   配置快照变化后必须重新审阅。
    审批会刷新容量，并通过共享部署生命周期提交已审阅清单。
 4. **Deployment execution（部署执行）**显示实际组件状态和日志入口。
    只有执行成功且所有组件报告就绪时，摘要才显示 **Deployment ready（部署就绪）**。

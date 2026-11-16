@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, Box, Database, Rocket, Search, SlidersHorizontal, Sparkles } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Box, CheckCircle2, Cpu, Database, Rocket, Search, Server, SlidersHorizontal, Sparkles } from 'lucide-react';
 import { CATEGORIES, MODELS } from '@repo/shared/catalog';
 import { requestJson } from '../../../shared/api/httpClient';
 import { usePolling } from '../../../shared/lib/usePolling';
-import { Badge, Button, EmptyState, Input, ModuleHeader, ModulePage, Panel, Select, StorageVolumeSelect } from '../../../shared/ui';
+import { Badge, Button, EmptyState, Input, Modal, ModuleHeader, ModulePage, Panel, Select, StorageVolumeSelect, Walkthrough } from '../../../shared/ui';
+import { cn } from '../../../shared/lib/cn';
 import { FormError } from '../../../shared/ui/FormError';
 import { listStorageVolumes } from '../../storage';
 import { listModelCacheEntries } from '../../model-cache';
@@ -11,6 +12,9 @@ import { AgenticDeploymentWorkspace, ManualDeploymentWorkspace } from '../../dep
 import { useAuth } from '../../auth';
 import { consumePendingModelMarketCluster } from '../model/transfer';
 import { standardRecommendation } from '../model/standardRecommendation';
+import { DEPLOYMENT_PREVIEW, mockEnvironmentFromProfiles } from '../../deployment/api/agenticDeploymentBackend';
+import { MockDeploymentWorkspace } from '../../deployment/ui/ManualDeploymentWorkspace';
+import { getHardwareProfiles } from '../../clusters/ui/ClusterMonitoringStack/hardwareProfilesBackend';
 
 function deploymentName(model) {
     const suffix = crypto.randomUUID().slice(0, 8);
@@ -41,7 +45,11 @@ export function ModelCard({ model, onSelect }) {
 
 export default function ModelMarketPage({ onNavigate, isActive = true }) {
     const { can } = useAuth();
+    const [previewRequested, setPreviewRequested] = useState(() => typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('preview') === DEPLOYMENT_PREVIEW.id);
+    const [preview, setPreview] = useState(null), [targetOpen, setTargetOpen] = useState(false);
+    const [previewReload, setPreviewReload] = useState(0);
     const [selected, setSelected] = useState(() => {
+        if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('preview') === DEPLOYMENT_PREVIEW.id) return MODELS.find(model => model.repository === DEPLOYMENT_PREVIEW.model);
         const saved = sessionStorage.getItem('prism_model_market_return_draft');
         if (!saved) return null;
         try { return MODELS.find(model => model.repository === JSON.parse(saved)?.model) || null; }
@@ -54,9 +62,19 @@ export default function ModelMarketPage({ onNavigate, isActive = true }) {
     const [loadingStorage, setLoadingStorage] = useState(false), [cacheReady, setCacheReady] = useState(false);
     const [checkingCache, setCheckingCache] = useState(false), [error, setError] = useState('');
     const [mode, setMode] = useState('manual'), [draft, setDraft] = useState(null);
+    const [objective, setObjective] = useState('balanced');
+    const [previousPlans, setPreviousPlans] = useState([]);
     const [pendingCluster] = useState(() => consumePendingModelMarketCluster());
     const [hardware, setHardware] = useState(null);
+    const [tourStep, setTourStep] = useState(null);
     const cacheRequest = useRef(0);
+    useEffect(() => {
+        if (!previewRequested) return undefined;
+        let active = true;
+        getHardwareProfiles().then(payload => { if (active) { setPreview(mockEnvironmentFromProfiles(payload.profiles || [])); setError(''); } })
+            .catch(failure => { if (active) setError(failure.message); });
+        return () => { active = false; };
+    }, [previewRequested, previewReload]);
     useEffect(() => {
         if (!selected) return;
         const saved = sessionStorage.getItem('prism_model_market_return_draft_values');
@@ -71,19 +89,20 @@ export default function ModelMarketPage({ onNavigate, isActive = true }) {
         } catch { setError('The saved model draft could not be restored. Choose deployment requirements again.'); }
     }, [selected]);
     const loadClusters = useCallback(async () => {
+        if (previewRequested) return;
         try {
             const payload = await requestJson('/api/cluster/clusters');
             const items = payload.items || [];
             setClusters(items);
             setCluster(current => current || (items.some(item => item.id === pendingCluster) ? pendingCluster : items.find(item => item.ready)?.id) || '');
         } catch (failure) { setError(failure.message); }
-    }, [pendingCluster]);
+    }, [pendingCluster, previewRequested]);
     useEffect(() => { if (isActive) loadClusters(); }, [loadClusters, isActive]);
-    usePolling(loadClusters, { enabled: isActive });
+    usePolling(loadClusters, { enabled: isActive && !previewRequested });
     useEffect(() => {
         let active = true;
         setHardware(null); setVolumes([]); setStorage(''); setCacheReady(false);
-        if (!cluster || !isActive) return undefined;
+        if (!cluster || !isActive || previewRequested) return undefined;
         setLoadingStorage(true);
         requestJson(`/api/cluster/overview?clusterId=${encodeURIComponent(cluster)}`)
             .then(overview => { if (active) setHardware(overview.kubernetes?.hardware || null); })
@@ -95,27 +114,42 @@ export default function ModelMarketPage({ onNavigate, isActive = true }) {
         }).catch(failure => { if (active) setError(failure.message); })
             .finally(() => { if (active) setLoadingStorage(false); });
         return () => { active = false; };
-    }, [cluster, isActive]);
+    }, [cluster, isActive, previewRequested]);
     const checkCache = useCallback(async () => {
         const request = ++cacheRequest.current;
-        if (!selected || !storage || !cluster) { setCacheReady(false); return; }
+        if (previewRequested || !selected || !storage || !cluster) { setCacheReady(false); return; }
         setCheckingCache(true);
         try {
             const entries = await listModelCacheEntries({ clusterId: cluster, storageVolumeId: storage });
             if (request === cacheRequest.current) setCacheReady(entries.some(entry => entry.status === 'ready' && entry.source?.kind === 'huggingface' && String(entry.source.huggingface.repoId || '').toLowerCase() === selected.repository.toLowerCase()));
         } catch (failure) { if (request === cacheRequest.current) { setCacheReady(false); setError(failure.message); } }
         finally { if (request === cacheRequest.current) setCheckingCache(false); }
-    }, [selected, storage, cluster]);
+    }, [selected, storage, cluster, previewRequested]);
     useEffect(() => { setCacheReady(false); if (isActive) checkCache(); return () => { cacheRequest.current += 1; }; }, [checkCache, isActive]);
-    usePolling(checkCache, { enabled: isActive && Boolean(selected && storage && cluster), intervalMs: 10000 });
-    const choose = model => { setSelected(model); setDescription(''); setDraft(null); setMode('manual'); setError(''); };
+    usePolling(checkCache, { enabled: isActive && !previewRequested && Boolean(selected && storage && cluster), intervalMs: 10000 });
+    const changePreview = enabled => {
+        setPreviewRequested(enabled); setError('');
+        const url = new URL(window.location.href);
+        if (enabled) url.searchParams.set('preview', DEPLOYMENT_PREVIEW.id);
+        else url.searchParams.delete('preview');
+        window.history.replaceState({}, '', url);
+    };
+    const choose = model => { setSelected(model); setDescription(''); setDraft(null); setMode('manual'); changePreview(false); };
+    const openPreview = () => { setSelected(MODELS.find(model => model.repository === DEPLOYMENT_PREVIEW.model)); setDraft(null); changePreview(true); setTargetOpen(false); };
     const begin = event => {
-        event.preventDefault(); setError('');
+        event.preventDefault(); setError(''); setPreviousPlans([]);
+        if (previewRequested) {
+            if (!preview) { setError('Wait for the hardware profile to load.'); return; }
+            setTourStep(null);
+            setDraft({ model: selected.repository, modelTitle: selected.name, deploymentName: name || 'qwen3-mock', clusterId: preview.clusterId, clusterName: preview.clusterName, initialObjective: mode === 'manual' ? 'balanced' : objective, preview });
+            return;
+        }
         if (!cacheReady) { setError('The selected model must be ready in the selected model cache.'); return; }
+        setTourStep(null);
         const defaults = standardRecommendation(selected, hardware);
         setDraft({
             model: selected.repository, modelTitle: selected.name, modelWeightGiB: selected.weightGiB || selected.sizeGiB,
-            deploymentName: name, description, clusterId: cluster, clusterName: clusters.find(item => item.id === cluster)?.name, storageVolumeId: storage, storageVolumeName: volumes.find(item => item.id === storage)?.name,
+            deploymentName: name, description, initialObjective: mode === 'manual' ? 'balanced' : objective, clusterId: cluster, clusterName: clusters.find(item => item.id === cluster)?.name, storageVolumeId: storage, storageVolumeName: volumes.find(item => item.id === storage)?.name,
             contextLength: defaults.maxModelLen, gpuMemoryUtilization: 0.9,
             maxNumSeqs: 256, maxNumBatchedTokens: 8192, vllmArguments: selected.vllmArguments || [],
         });
@@ -124,6 +158,7 @@ export default function ModelMarketPage({ onNavigate, isActive = true }) {
     const models = MODELS.filter(model => (category === 'All' || model.category === category) && words.every(word => [model.name, model.family, model.repository, model.modelType, model.category, model.dtype].some(value => String(value || '').toLowerCase().includes(word))));
     if (!selected) return <ModulePage contentClassName="flex flex-col gap-4 py-4 lg:py-5">
         <ModuleHeader icon={Database} title="Model Catalog" />
+        <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-theme-muted">Choose a model to deploy.</p><Button variant="secondary" onClick={openPreview}><Cpu size={16} />Try {DEPLOYMENT_PREVIEW.label} mock</Button></div>
         <div className="flex flex-wrap items-center gap-3">
             <div className="flex min-w-0 w-full flex-wrap gap-2 lg:w-auto lg:flex-1" role="tablist" aria-label="Model categories">{CATEGORIES.map(item => <Button type="button" key={item} role="tab" size="sm" variant="catalogTab" className="h-auto rounded-md px-3 py-1.5 font-normal" aria-selected={category === item} onClick={() => setCategory(item)}>{item}</Button>)}</div>
             <div className="ml-auto flex max-w-full flex-wrap items-center gap-2">
@@ -137,46 +172,68 @@ export default function ModelMarketPage({ onNavigate, isActive = true }) {
         <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">{models.map(model => <ModelCard key={model.id} model={model} onSelect={choose} />)}{!models.length && <EmptyState className="col-span-full" icon={<Search size={22} aria-hidden="true" />} title="No matching models" message="Try another search or change the model category." />}</section>
     </ModulePage>;
     const allowed = can('deployment:run:create');
-    const Workspace = mode === 'manual' ? ManualDeploymentWorkspace : AgenticDeploymentWorkspace;
-    return <ModulePage contentClassName="flex flex-col gap-5">
-        <ModuleHeader icon={Rocket} title="Create deployment" />
+    const suggestAgentic = ({ requirements, provider, runId, mockSettings, mockRuntime, runtime }) => {
+        setPreviousPlans(current => [...current, { mode, draft: { ...draft, resumeRunId: runId, initialMockSettings: mockSettings } }]);
+        setMode('agentic');
+        setDraft({ ...draft, ...runtime, planningAttemptId: crypto.randomUUID(), resumeRunId: undefined,
+            initialObjective: requirements.objective, initialRequirements: requirements, initialProvider: provider,
+            initialMockSettings: mockRuntime });
+    };
+    const restorePlan = () => {
+        const previous = previousPlans.at(-1);
+        if (!previous) return;
+        setMode(previous.mode); setDraft(previous.draft); setPreviousPlans(current => current.slice(0, -1));
+    };
+    const Workspace = draft?.preview ? MockDeploymentWorkspace : mode === 'manual' ? ManualDeploymentWorkspace : AgenticDeploymentWorkspace;
+    return <ModulePage contentClassName="mx-auto flex max-w-7xl flex-col gap-5">
+        {!draft && <ModuleHeader icon={Rocket} title="Create deployment" />}
         {!draft && <Button className="self-start" variant="ghost" onClick={() => { setSelected(null); setDraft(null); }}><ArrowLeft size={15} />Model Catalog</Button>}
         {!allowed ? <EmptyState title="Your role cannot create deployments" message="Use an existing deployment or request deployment-create permission." action={<Button onClick={() => onNavigate('optimization-deployments')}>Open Deployments</Button>} /> : draft ? <>
-            <Workspace key={`${mode}:${draft.clusterId}:${draft.model}:${draft.deploymentName}`} embedded draft={draft} onBack={() => setDraft(null)} onDeploymentStarted={run => onNavigate('optimization-deployments', { clusterId: draft.clusterId, deploymentSearch: run?.deployment_execution_id || run?.deployment_run_id || draft.deploymentName })} />
-        </> : <form onSubmit={begin} className="space-y-5">
-            <Panel title="Deployment target" actions={<Badge tone="neutral">{selected.family}</Badge>}>
-                <h2 className="text-lg font-semibold">{selected.name}</h2>
-                <p className="mb-5 mt-1 break-all text-sm text-theme-muted">{selected.repository}</p>
-                <div className="grid gap-4 md:grid-cols-2">
-                    <label className="text-sm">Cluster<Select className="mt-1" required value={cluster} onChange={event => setCluster(event.target.value)}><option value="">Select cluster</option>{clusters.map(item => <option key={item.id} value={item.id} disabled={!item.ready}>{item.name}{item.ready ? '' : ' (not ready)'}</option>)}</Select></label>
-                    <label className="block text-sm">Deployment name
-                        <Input className="mt-1" required value={name} onChange={event => setName(event.target.value)} />
-                    </label>
-                </div>
-                <div className="mt-6 border-t border-theme-border pt-5">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                            <h3 className="text-sm font-semibold">Model files</h3>
-                            <p role="status" className="mt-1 text-sm text-theme-muted">{!cluster ? 'Choose a cluster to check model availability.' : loadingStorage || (checkingCache && !cacheReady) ? 'Checking model availability...' : cacheReady ? 'Ready in the selected model cache.' : 'This model needs a ready cache before you can build a plan.'}</p>
-                        </div>
-                        <Button type="button" size="sm" variant="secondary" disabled={!cluster} onClick={() => onNavigate('model-cache', { downloadModel: { clusterId: cluster, repoId: selected.repository, storageVolumeId: storage } })}>{cacheReady ? 'Manage model cache' : 'Prepare model files'}</Button>
+            <Workspace key={`${mode}:${draft.clusterId}:${draft.model}:${draft.deploymentName}:${draft.planningAttemptId || 'initial'}`} mode={mode} embedded draft={draft} onBack={() => { setDraft(null); setPreviousPlans([]); }} onSuggestAgentic={suggestAgentic} onRestorePlan={previousPlans.length ? restorePlan : undefined} onDeploymentStarted={run => onNavigate('optimization-deployments', { clusterId: draft.clusterId, deploymentSearch: run?.deployment_execution_id || run?.deployment_run_id || draft.deploymentName })} />
+        </> : <form onSubmit={begin} onInvalid={event => event.target.closest('details')?.setAttribute('open', '')} className="space-y-5">
+            <section id="deployment-mode" aria-label="Planning mode" className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="mb-2 text-xs font-semibold uppercase tracking-wider text-theme-muted">{selected.name} · Deployment</p><h2 className="text-3xl font-semibold tracking-tight">Choose how to build your plan</h2></div><Button type="button" variant="ghost" onClick={() => setTourStep(0)}>1–3 Walkthrough</Button></div>
+                <div className="grid gap-4 md:grid-cols-2">{[
+                    ['manual', 'Manual', 'Compose, then adjust', 'Include supported, compatible settings.', ['Compatibility', 'Configuration', 'Your review'], <SlidersHorizontal key="manual" size={25} />],
+                    ['agentic', 'Agentic', 'Start with your objective', 'Recommend a configuration for your goal.', ['Your objective', 'Recommendation', 'Your review'], <Sparkles key="agentic" size={25} />],
+                ].map(([id, label, subtitle, detail, path, icon]) => <Button type="button" key={id} variant="outline" size="md" className={cn('deployment-mode-card', mode === id && 'is-selected')} aria-pressed={mode === id} onClick={() => setMode(id)}>
+                    <span className="flex w-full items-center justify-between"><span className="deployment-mode-icon">{icon}</span><Badge tone={mode === id ? 'brand' : 'neutral'}>{mode === id ? 'Selected' : 'Choose'}</Badge></span>
+                    <span className="text-3xl font-semibold tracking-tight text-theme-text">{label}</span><span className="text-base font-medium">{subtitle}</span><span className="text-sm font-normal text-theme-muted">{detail}</span>
+                    <span className="deployment-mode-path">{path.map((part, index) => <span key={part}>{index > 0 && <ArrowRight size={12} aria-hidden="true" />}{part}</span>)}</span>
+                </Button>)}</div>
+            </section>
+            <Panel id="deployment-continue" tone="subtle" className="shadow-none">
+                <div className="flex flex-wrap items-center justify-between gap-5">
+                    <div><p className="mb-2 text-xs font-semibold uppercase tracking-wider text-theme-muted">{mode === 'manual' ? 'Manual' : 'Agentic'}</p><h3 className="text-lg font-semibold">{mode === 'manual' ? 'Start with compatible defaults' : 'What should the plan prioritize?'}</h3>
+                        {mode === 'manual' ? <p className="mt-2 text-sm text-theme-muted">Review the generated plan and adjust any supported setting.</p> : <div className="mt-3 flex flex-wrap gap-2" aria-label="Planning objective">{[['balanced', 'Balanced'], ['latency', 'Low latency'], ['throughput', 'High throughput']].map(([id, label]) => <Button key={id} type="button" variant={objective === id ? 'primary' : 'secondary'} aria-pressed={objective === id} onClick={() => setObjective(id)}>{label}</Button>)}</div>}
                     </div>
-                    <details className="mt-3" open={!cacheReady}>
-                        <summary className="cursor-pointer text-sm text-theme-muted">{cacheReady ? `Cache: ${volumes.find(item => item.id === storage)?.name || storage} / Change` : 'Choose model cache'}</summary>
-                        <label className="mt-3 block max-w-xl text-sm">Model cache storage<StorageVolumeSelect className="mt-1" value={storage} onChange={setStorage} volumes={volumes} loading={loadingStorage} disabled={!cluster} placeholder="Select ready model storage" /></label>
-                    </details>
+                    <Button type="submit" size="md" disabled={previewRequested ? !preview : !cluster || !name || !cacheReady || checkingCache || !selected.vllmSupported}>{mode === 'manual' ? 'Build Manual plan' : 'Build Agentic plan'}<ArrowRight size={15} /></Button>
                 </div>
             </Panel>
-            <Panel title="Planning strategy">
-                <div className="grid gap-3 md:grid-cols-2">{[
-                    ['manual', 'Compatible optimizations', 'Manual', 'Combine supported optimizations within available resources. Review and adjust the plan without an AI provider.', <SlidersHorizontal key="manual" size={18} />],
-                    ['agentic', 'Goal-based recommendation', 'Agentic', 'Compare plans for your workload and limits. AI assistance and benchmark trials are optional.', <Sparkles key="agentic" size={18} />],
-                ].map(([id, label, technical, detail, icon]) => <Button type="button" key={id} variant={mode === id ? 'secondary' : 'outline'} size="md" className="h-auto flex-col items-start gap-3 whitespace-normal p-5 text-left" aria-pressed={mode === id} onClick={() => setMode(id)}><span className="flex w-full flex-wrap items-center gap-2 font-semibold">{icon}{label}{mode === id && <Badge className="ml-auto" tone="info">Selected</Badge>}</span><span className="text-sm font-normal leading-relaxed">{detail}</span><span className="text-xs text-theme-muted">{technical}</span></Button>)}</div>
-                <p className="mt-4 text-sm text-theme-muted">Both strategies produce an editable plan. Nothing deploys without your confirmation.</p>
+            <Panel id="deployment-target" padding="sm">
+                {previewRequested ? <>
+                    <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><Cpu size={22} /><div><h3 className="font-semibold">{DEPLOYMENT_PREVIEW.label} sandbox</h3><p className="text-sm text-theme-muted">{DEPLOYMENT_PREVIEW.nodes} nodes · {DEPLOYMENT_PREVIEW.devices} × {DEPLOYMENT_PREVIEW.deviceModel} · {DEPLOYMENT_PREVIEW.memoryGiB} GiB / device</p></div></div><Badge tone="warning" size="md">Mock</Badge></div>
+                    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-theme-border pt-3"><span className="flex items-center gap-2 text-sm">{preview && <CheckCircle2 size={16} />}{preview ? 'Model cache ready · simulated' : error ? 'Hardware profile unavailable' : 'Loading hardware profile…'}</span><Button type="button" variant="ghost" size="sm" onClick={() => changePreview(false)}>Use a real cluster</Button></div>
+                    {!preview && error && <Button className="mt-3" type="button" variant="secondary" onClick={() => { setError(''); setPreviewReload(value => value + 1); }}>Retry hardware profile</Button>}
+                </> : cluster ? <>
+                    <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><Server size={22} /><div><h3 className="font-semibold">{clusters.find(item => item.id === cluster)?.name || cluster}</h3><p role="status" className="text-sm text-theme-muted">{loadingStorage || (checkingCache && !cacheReady) ? 'Checking model cache…' : cacheReady ? 'Model cache ready' : 'Model cache needs preparation'}</p></div></div><Button type="button" size="sm" variant="secondary" onClick={() => setTargetOpen(true)}>Change setup</Button></div>
+                    {!cacheReady && !loadingStorage && <Button type="button" className="mt-3" size="sm" variant="secondary" onClick={() => onNavigate('model-cache', { downloadModel: { clusterId: cluster, repoId: selected.repository, storageVolumeId: storage } })}>Prepare model cache<ArrowRight size={14} /></Button>}
+                </> : <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><Server size={22} /><div><h3 className="font-semibold">Choose an environment</h3><p className="text-sm text-theme-muted">Connect a cluster, or explore with a ready mock.</p></div></div><div className="flex gap-2"><Button type="button" variant="secondary" onClick={() => clusters.length ? setTargetOpen(true) : onNavigate('clusters')}>Choose cluster</Button><Button type="button" onClick={openPreview}>Try {DEPLOYMENT_PREVIEW.label} mock</Button></div></div>}
             </Panel>
             <FormError message={error} />
             {!selected.vllmSupported && <p role="alert">This model requires a runtime not supported by this workflow.</p>}
-            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-theme-border pt-4"><p className="text-sm text-theme-muted">{cacheReady ? 'Next: review a plan before using cluster resources.' : 'Prepare the model files to continue.'}</p><Button type="submit" size="md" disabled={!cluster || !name || !cacheReady || checkingCache || !selected.vllmSupported}>{mode === 'manual' ? 'Build deployment plan' : 'Continue to deployment goals'}<ArrowRight size={15} /></Button></div>
         </form>}
+        <Modal isOpen={targetOpen} onClose={() => setTargetOpen(false)} title="Deployment setup" size="sm" footer={<Button onClick={() => setTargetOpen(false)}>Done</Button>}>
+            <div className="space-y-4">
+                <label className="block text-sm">Cluster<Select className="mt-1" value={cluster} onChange={event => setCluster(event.target.value)}><option value="">Select cluster</option>{clusters.map(item => <option key={item.id} value={item.id} disabled={!item.ready}>{item.name}{item.ready ? '' : ' (not ready)'}</option>)}</Select></label>
+                <label className="block text-sm">Deployment name<Input className="mt-1" value={name} onChange={event => setName(event.target.value)} /></label>
+                {cluster && <label className="block text-sm">Model cache<StorageVolumeSelect className="mt-1" value={storage} onChange={setStorage} volumes={volumes} loading={loadingStorage} placeholder="Select model cache" /></label>}
+            </div>
+        </Modal>
+        {!draft && <Walkthrough step={tourStep} onStepChange={setTourStep} onClose={() => setTourStep(null)} steps={[
+            { target: '#deployment-mode', title: 'Choose a planning mode', description: 'Manual combines supported compatible optimizations. Agentic recommends a plan for your objective. Both remain editable.' },
+            { target: '#deployment-target', title: 'Reuse the current setup', description: 'The model is already selected. Lens discovers cluster resources and checks model files. Use Change setup only when needed. The mock includes simulated model files.' },
+            { target: '#deployment-continue', title: 'Build, then review', description: 'Continue with this mode. Numeric workload and latency targets are optional. Deployment requires a separate confirmation.' },
+        ]} />}
     </ModulePage>;
 }

@@ -148,7 +148,7 @@ export function optimizationPlan(candidate, decisions = []) {
 
 export function layoutPlan(plan) {
     return plan.nodes.map((node, index) => ({
-        ...node, width: 196, height: node.capability ? 112 : 96,
+        ...node, width: node.width ?? 196, height: node.height ?? (node.capability ? 112 : 96),
         x: node.x ?? 140 + node.tier * 300,
         y: node.y ?? 84 + plan.nodes.slice(0, index).filter(n => n.tier === node.tier).length * 176,
     }));

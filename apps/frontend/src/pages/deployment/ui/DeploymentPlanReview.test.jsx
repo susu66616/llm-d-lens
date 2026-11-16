@@ -83,18 +83,18 @@ test('review exposes reasons and preserves technical views without making them t
 test('goal-based planning makes AI optional and keeps saved goals visible', async () => {
     const { DeploymentRequirementsForm } = await import('./DeploymentRequirementsForm.jsx');
     const html = renderToStaticMarkup(<DeploymentRequirementsForm mode="agentic" />);
-    assert.match(html, /AI assistance is optional/);
-    assert.match(html, /<details><summary[^>]*>AI assistance/);
+    assert.match(html, /AI is optional/);
+    assert.match(html, /<details><summary[^>]*>Describe a goal/);
     const restored = renderToStaticMarkup(<DeploymentRequirementsForm mode="agentic" initialValue={{ plannerPrompt: 'Analyze documents' }} />);
-    assert.match(restored, /<details open=""><summary[^>]*>AI assistance/);
+    assert.match(restored, /<details open=""><summary[^>]*>Describe a goal/);
     assert.match(restored, /Analyze documents/);
 });
 test('creation asks for business needs, not a guide or optimization configuration', async () => {
     const { DeploymentRequirementsForm } = await import('./DeploymentRequirementsForm.jsx');
     const html = renderToStaticMarkup(<DeploymentRequirementsForm />);
-    assert.match(html, /Workload and limits/);
-    assert.match(html, /Traffic is not required to enable caching/);
-    assert.match(html, /Changes which combinations fit/);
+    assert.match(html, /Manual setup/);
+    assert.match(html, /traffic does not switch optimizations on or off/);
+    assert.match(html, /resource limit constrains the topology/);
     assert.doesNotMatch(html, /placeholder="Unknown"/);
     assert.doesNotMatch(html, /Deployment method|Optimize for|Optimization controls|General chat|1024|256/);
 });

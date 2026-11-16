@@ -14,6 +14,7 @@
 
 import React from 'react';
 import { cn } from '../lib/cn';
+import { Button } from './Button';
 
 const PADDING = {
     none: 'p-0',
@@ -52,4 +53,25 @@ export function Panel({ title, actions, padding = 'md', tone = 'neutral', classN
             {children}
         </div>
     );
+}
+
+export function WorkspaceHeader({ title, subtitle, eyebrow, badge, actions, backAction }) {
+    return <header className="space-y-4">
+        {backAction}
+        <div className="flex flex-wrap items-end justify-between gap-4">
+            <div className="min-w-0"><div className="mb-2 flex items-center gap-2"><span className="text-xs font-semibold uppercase tracking-wider text-theme-muted">{eyebrow}</span>{badge}</div><h2 className="break-words text-2xl font-semibold tracking-tight text-theme-text">{title}</h2>{subtitle && <p className="mt-2 text-sm text-theme-muted">{subtitle}</p>}</div>
+            <div className="flex flex-wrap items-center gap-2">{actions}</div>
+        </div>
+    </header>;
+}
+
+/** Compact context row; interactive facts open their existing editor or review. */
+export function SummaryStrip({ items, ...props }) {
+    return <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-theme-border bg-theme-card md:grid-cols-4" {...props}>
+        {items.map(item => <div key={item.label} className="min-w-0 border-b border-r border-theme-border p-4 last:border-r-0 md:border-b-0">
+            <div className="text-xs text-theme-muted">{item.label}</div>
+            {item.onClick ? <Button variant="link" className="mt-1 h-auto max-w-full justify-start whitespace-normal p-0 text-left text-sm font-semibold" onClick={item.onClick} disabled={item.disabled}>{item.value}</Button> : <div className="mt-1 break-words text-sm font-semibold">{item.value}</div>}
+            {item.detail && <div className="mt-1 text-xs text-theme-muted">{item.detail}</div>}
+        </div>)}
+    </div>;
 }

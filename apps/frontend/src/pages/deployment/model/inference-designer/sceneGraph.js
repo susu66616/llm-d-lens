@@ -170,3 +170,126 @@ export function optimizationFlowPlan(graph, blocked = {}, canConfigure = () => t
     return { nodes, edges: edges.filter((edge, index) => edges.findIndex(item => item.from === edge.from && item.to === edge.to) === index),
         optimization: true, serving: split ? 'Separate prefill / decode servers' : 'Prefill + decode share one server' };
 }
+
+/** Group the existing catalog for progressive disclosure; never drop catalog entries. */
+export function servingStageGroups(graph, blocked = {}, canConfigure = () => true) {
+    const split = graph.nodes.some(node => node.id === 'prefill-worker');
+    const groups = [
+        { id: 'routing', label: 'Endpoint selection', action: 'Select serving endpoints', members: ['routing', 'epp', 'index-service'], primary: true },
+        ...(split ? [
+            { id: 'prefill', label: 'Prefill', action: 'Process input tokens', members: ['prefill', 'prefill-worker'], primary: true },
+            { id: 'decode', label: 'Decode', action: 'Generate output tokens', members: ['decode', 'decode-worker'], primary: true },
+        ] : [{ id: 'serving-worker', label: 'Prefill + Decode', action: 'Process input and generate tokens', members: ['serving-worker', 'prefill', 'decode'], primary: true }]),
+        { id: 'request', label: 'Request processing', action: 'API and input preparation', members: ['request', 'prepare'] },
+        { id: 'response', label: 'Response', action: 'Output and tracing', members: ['response'] },
+        { id: 'pods', label: 'Service & platform', action: 'Workloads and infrastructure', members: ['pods', 'workers', 'service', 'cluster'] },
+    ].map(group => ({ ...group, capabilities: [] }));
+    const projected = optimizationFlowPlan(graph, blocked, canConfigure);
+    for (const cap of graph.capabilities) {
+        const sharedKV = ['cache-plane', 'cpu-cache'].includes(cap.stage);
+        const owners = sharedKV || ['transfer', 'parallel'].includes(cap.id)
+            ? groups.filter(group => ['prefill', 'decode', 'serving-worker'].includes(group.id))
+            : groups.filter(group => group.members.includes(cap.stage) || group.members.includes(cap.owner));
+        // New source-defined capabilities remain accessible even without a known stage.
+        const targets = owners.length ? owners : [groups.find(group => group.id === 'pods')];
+        const entry = { ...cap, ...projected.nodes.find(node => node.id === cap.id), stages: targets.map(group => group.id) };
+        for (const group of targets) group.capabilities.push(entry);
+    }
+    for (const group of groups) group.capabilities.sort((a, b) => Number(b.enabled) - Number(a.enabled));
+    return groups;
+}
+
+/** Wrap before laying out SVG text, so labels and cards use the same dimensions. */
+function diagramTextLines(value, limit = 30) {
+    const words = String(value).split(/\s+/).flatMap(word => word.length > limit ? word.match(new RegExp(`.{1,${limit}}`, 'g')) : [word]);
+    const lines = [];
+    for (const word of words) {
+        const last = lines.at(-1);
+        if (last && last.length + word.length + 1 <= limit) lines[lines.length - 1] += ` ${word}`;
+        else lines.push(word);
+    }
+    return lines;
+}
+
+/** Compact overview with bounded, in-place expansion of source-owned settings. */
+export function servingFlowDiagram(graph, blocked = {}, canConfigure = () => true, { expandedGroup, pages = {} } = {}) {
+    const split = graph.nodes.some(node => node.id === 'prefill-worker');
+    const catalog = optimizationFlowPlan(graph, blocked, canConfigure).nodes.filter(node => node.capability);
+    const laneFor = cap => cap.id === 'index' ? 'cache-index'
+        : ['cache-plane', 'cpu-cache'].includes(cap.stage) ? 'kv-settings'
+            : ['parallel', 'transfer'].includes(cap.id) ? 'compute-settings'
+                : ['request', 'prepare'].includes(cap.stage) ? 'request'
+                    : ['routing', 'prefill', 'decode', 'response'].includes(cap.stage) ? cap.stage : 'pods';
+    const definitions = [
+        ['request', 'Request', 'API / input processing', 'request', 140],
+        ['routing', 'Endpoint selection', 'Endpoint Picker (EPP)', 'routing', 410],
+        ['prefill', 'Prefill', 'Process input tokens', 'prefill', 680],
+        ['decode', 'Decode', 'Generate output tokens', 'decode', 950],
+        ['response', 'Response', 'Stream output tokens', 'response', 1220],
+        ['cache-index', 'KV cache index', 'Cache location information', 'cache', 410],
+        ['pods', 'Service & platform', 'Model-pool lifecycle', 'pods', 950],
+        ['kv-settings', 'KV cache', 'Reuse / offload / sharing', 'cache', 680],
+        ['compute-settings', 'Compute configuration', split ? 'Separate prefill / decode' : 'Shared by Prefill + Decode', 'compute', 950],
+    ];
+    const groups = definitions.map(([id, name, detail, icon, x]) => {
+        const capabilities = graph.capabilities.filter(cap => laneFor(cap) === id)
+            .map(cap => ({ ...cap, ...catalog.find(item => item.id === cap.id) }))
+            .sort((a, b) => Number(b.enabled) - Number(a.enabled));
+        const totalPages = Math.max(1, Math.ceil(capabilities.length / 4));
+        const page = Math.min(Math.max(0, pages[id] || 0), totalPages - 1);
+        const expanded = expandedGroup === id;
+        const target = ({ 'compute-settings': split ? 'pods' : 'serving-worker', 'kv-settings': 'cache-plane', 'cache-index': 'index-service' })[id] || id;
+        const entity = graph.nodes.find(node => node.id === target);
+        const configureTarget = entity && canConfigure(entity) ? target : null;
+        const rows = expanded ? capabilities.slice(page * 4, (page + 1) * 4).map(cap => ({ ...cap, titleLines: diagramTextLines(cap.label, 24), height: diagramTextLines(cap.label, 24).length * 16 + 30 })) : [];
+        return { id, name, detail, icon, x, capabilities, rows, expanded, page, totalPages, configureTarget,
+            height: 144 + (expanded ? rows.reduce((sum, row) => sum + row.height + 6, 0) + (rows.length ? 38 : 30) + (configureTarget ? 32 : 0) : 0) };
+    });
+    const get = id => groups.find(group => group.id === id);
+    const topHeight = Math.max(get('cache-index').height, get('pods').height);
+    const mainTop = 30 + topHeight + 96;
+    const mainHeight = Math.max(...groups.slice(0, 5).map(group => group.height));
+    const lowerTop = mainTop + mainHeight + 100;
+    const nodes = [], edges = [], regions = [];
+    for (const group of groups) {
+        const { id, name, detail, icon, x, height, rows, capabilities, expanded, page, totalPages, configureTarget } = group;
+        const top = ['cache-index', 'pods'].includes(id) ? 30 + topHeight - height : ['kv-settings', 'compute-settings'].includes(id) ? lowerTop : mainTop;
+        const targets = id === 'cache-index' ? ['routing'] : ['kv-settings', 'compute-settings', 'pods'].includes(id) ? ['prefill', 'decode'] : [id];
+        nodes.push({ id, name, detail, icon, x, y: top + height / 2, width: 220, height, headerHeight: 144, container: true, expanded, page, totalPages, configureTarget,
+            summaryLines: capabilities.filter(cap => cap.enabled).slice(0, 2).map(cap => cap.label.length > 32 ? `${cap.label.slice(0, 30)}…` : cap.label),
+            kind: 'Serving stage', titleLines: diagramTextLines(name, 22), count: capabilities.length, configured: capabilities.filter(cap => cap.enabled).length,
+            inPlan: groups.slice(0, 5).some(item => item.id === id) || capabilities.some(cap => cap.enabled) });
+        let rowTop = top + 144;
+        for (const row of rows) {
+            nodes.push({ ...row, parentId: id, icon, x, y: rowTop + row.height / 2, width: 200 });
+            for (const target of targets) edges.push({ from: row.id, to: target, kind: 'attachment', label: 'applies to', pending: !row.enabled, hidden: true });
+            rowTop += row.height + 6;
+        }
+    }
+    const byId = new Map(nodes.map(node => [node.id, node]));
+    const box = id => { const node = byId.get(id); return { ...node, top: node.y - node.height / 2, bottom: node.y + node.height / 2 }; };
+    const connect = (from, to, kind, label, points, labelX, labelY) => edges.push({ from, to, kind, label, points,
+        pending: !byId.get(from).inPlan, labelOnSelect: from === 'prefill' && to === 'decode', path: points.map(([x, y], i) => `${i ? 'L' : 'M'} ${x} ${y}`).join(' '),
+        labelX, labelY, labelWidth: label.length * 5.8 + 18 });
+    const flowY = mainTop + 52;
+    for (const [from, to] of [['request', 'routing'], ['routing', 'prefill'], ['prefill', 'decode'], ['decode', 'response']]) {
+        connect(from, to, from === 'prefill' ? 'kv' : 'flow', from === 'prefill' ? split ? 'KV transfer' : 'KV cache' : '',
+            [[box(from).x + 110, flowY], [box(to).x - 110, flowY]], (box(from).x + box(to).x) / 2, flowY - 24);
+    }
+    connect('cache-index', 'routing', 'attachment', 'cache locality', [[410, box('cache-index').bottom], [410, mainTop]], 410, mainTop - 45);
+    for (const [target, startX, endX, label] of [['prefill', 900, 760, 'pool lifecycle'], ['decode', 1000, 990, '']]) {
+        const y = mainTop - 50;
+        connect('pods', target, 'attachment', label, [[startX, box('pods').bottom], [startX, y], [endX, y], [endX, mainTop]], 830, y);
+    }
+    // Shared optimizations attach to both processing stages; they are not request hops.
+    connect('kv-settings', 'prefill', 'kv', 'reuse KV', [[640, lowerTop], [640, box('prefill').bottom]], 640, lowerTop - 32);
+    connect('kv-settings', 'decode', 'kv', 'KV state', [[720, lowerTop], [720, lowerTop - 64], [910, lowerTop - 64], [910, box('decode').bottom]], 810, lowerTop - 64);
+    connect('compute-settings', 'decode', 'attachment', 'configures', [[1000, lowerTop], [1000, box('decode').bottom]], 1000, lowerTop - 32);
+    connect('compute-settings', 'prefill', 'attachment', '', [[910, lowerTop], [910, lowerTop - 28], [750, lowerTop - 28], [750, box('prefill').bottom]], 0, 0);
+    if (split) for (const id of ['prefill', 'decode']) regions.push({ id: `${id}-server`, label: `${id === 'prefill' ? 'Prefill' : 'Decode'} model server`, x: box(id).x - 124, y: mainTop - 38, width: 248, height: box(id).height + 54 });
+    else regions.push({ id: 'model-server', label: 'Model server · Prefill + Decode', x: 556, y: mainTop - 38, width: 518, height: Math.max(box('prefill').height, box('decode').height) + 54 });
+    return { presentation: 'serving', optimization: true, nodes, edges, regions, groups, offsetX: 0, width: 1360,
+        height: lowerTop + Math.max(get('kv-settings').height, get('compute-settings').height) + 26,
+        serving: split ? 'Separate prefill / decode servers' : 'Prefill + decode share one server',
+        configuredCount: graph.capabilities.filter(cap => cap.enabled).length, totalCount: graph.capabilities.length };
+}

@@ -15,29 +15,50 @@ must be corrected before deployment.
 
 ## Configure and review Manual or Agentic plans
 
-The creation flow labels these strategies **Compatible optimizations (Manual)**
-and **Goal-based recommendation (Agentic)**. Both follow **Target → Deployment plan
-→ Deploy and observe** without changing the backend mode or approval rules.
+Choose **Manual** or **Agentic** in the two prominent mode cards, then reuse
+the compact environment card. Lens preselects a ready cluster when available, generates the
+deployment name and checks the selected model cache. **Change setup** opens cluster, name and model-cache controls together. An unavailable model cache still requires preparation.
+Neither mode asks for hardware specifications or a Guide before planning.
 
-Manual automatically combines applicable, supported optimizations; you do not
-choose a Guide or fill in hardware specifications. Agentic recommends a combination
-for your goal. Both discover cluster resources and automatically generate/check
-the selected configuration. Manual builds immediately after target selection, with
-no Notes field or workload questionnaire. Optional **Workload and constraints**
-refines capacity and targets; unknown or low expected reuse does not exclude a
-technically compatible optimization.
+**Build Manual plan** combines applicable, supported compatible optimizations and
+opens the reviewed configuration. Agentic offers Balanced, Low latency and High
+throughput on the same entry screen. **Build Agentic plan** opens the generated plan
+directly, with no intermediate questionnaire. Keep Balanced to continue without parameters. A restored plan preserves other supported objectives.
+**Describe a goal** optionally enables natural-language goals with an explicit AI
+provider; otherwise Agentic uses rule-based recommendations. The interface identifies
+which path is selected. Neither path establishes a measured optimum.
 
-The heading identifies the model and labels the model repository and cluster.
-The generated deployment name lives in **Deployment target details**; use
-**Change target** to edit it. The **Deployment configuration** workbench opens
-the **2D optimization flow** by default. Request stages are connected in order;
-optimizations attach to the stages they affect rather than becoming extra request
-hops. Combined serving shares one Prefill + Decode node; P/D configurations show
-separate stages. Click an optimization to open its settings in the side panel,
-or use its power button to enable or disable it. Disabled, unavailable and
-dependency-controlled capabilities remain inspectable with explanations.
-The graph is planned configuration, not measured traffic or actual placement.
+Resource limits, workload, request sizes and latency targets are collapsed optional
+sections. Blank inputs remain unspecified; saved constraints remain visible when
+reopened. The **1–3 Walkthrough** highlights mode, setup and continuation controls.
+The plan's **Walkthrough** highlights its summary, serving flow and unified review
+action without generating, changing or approving a plan for you.
+Skip or Escape closes the overlay; highlighted controls remain usable.
+
+The generated plan prominently retains **Manual plan** or **Agentic plan** alongside
+the model and cluster. Use **Change setup** to return to setup; existing
+backend plans remain saved under their original mode and target.
+The **Serving flow** shows a horizontal Request → Endpoint selection → Prefill → Decode → Response path.
+Combined serving places both compute phases inside one Model server boundary; P/D uses separate boundaries.
+Cache indexing, KV cache, compute configuration and service management connect to the stages they affect.
+These are logical processing and configuration relationships, not live traffic or measured placement.
+
+Every functional group is visible, with configured counts and a short summary. Select a group to expand
+its optimizations inside the diagram, including off and unavailable entries. Each group has its own pages
+of up to four settings; expanding another group collapses the previous one. Select an optimization to open
+its source, router or runtime parameters in a configuration drawer. **Stage parameters** inside an expanded group opens broader settings such as replicas, when declared by the source. Supported toggles and detailed editors
+use the existing compatibility checks. Unavailable settings explain their status and remain read-only.
+There is no separate Stage configuration table or global All settings visibility switch.
+Apply edited parameters and check resources before reviewing deployment. Closing the drawer keeps unapplied
+changes visible in the plan; discard them explicitly if needed. Narrow screens can scroll the diagram horizontally.
 The optional **3D technical view** retains the infrastructure topology.
+
+Use **Refine with Agentic** when the current plan does not fit your goal. Choose an objective and optionally
+adjust the existing workload and limits. The same model, cluster and runtime inputs are carried into a separate
+recommendation; exact source edits remain in the previous plan. **Return to previous plan** restores that saved
+plan without regenerating it. Apply or discard pending edits first. Recommendations still require resource checks
+and explicit deployment confirmation; no performance result is implied. This return history lasts while the setup
+page remains open. The mock supports objective selection only and uses simulated rules. Prefix caching and Chunked prefill expose an **Enabled / Disabled** control with an argument preview. **Apply changes** updates the mock plan and YAML; **Cancel** discards that edit. Other unsupported mock settings explain why they are unavailable.
 
 **Technical details: source Guides and all parameters** contains the complete
 Guide index from the cluster's pinned llm-d revision.
@@ -45,7 +66,7 @@ Unavailable, external-operation and unadapted Guides retain their explanations:
 being listed does not promise that a Guide or arbitrary combination can deploy.
 Selected Guides expose their compatibility choices and source variables.
 The flow includes independent prefix affinity and precise cache indexing.
-The side panel exposes only the selected node's source/router or runtime fields,
+The configuration drawer exposes only the selected node's source/router or runtime fields,
 including per-replica native CPU cache capacity. Source variants remain editable.
 **All deployment parameters** in Technical details includes the complete rendered
 parameter list and **Final YAML** editing.
@@ -75,15 +96,17 @@ Disabling native CPU cache retains its capacity for re-enabling.
 A changed source revision requires an
 explicit decision to discard source edits and adopt the current revision.
 
-The **Deployment summary** is below the full-width designer, keeping resource
-demand, planning-time capacity, cache, warnings and confirmation together. Select
+A compact strip above the serving flow summarizes topology, resources, optimization
+count and validation. **Review & deploy** opens the YAML and **Deployment summary**
+together in one dialog, including capacity, cache, warnings and **Confirm deployment**. Select
 the model-serving **Inference Service**, not EPP or metrics. Approval binds the
 selected endpoint and exact configuration checksum and rechecks capacity; editing
 does not provide a separate deploy path. Legacy saved plans expose **Load Guides
 and build source configuration** and retain their old preview in a disclosure.
 If the source catalog is unavailable, the error remains visible instead of
 silently presenting legacy templates as a fully supported source composition.
-Agentic **Alternatives** compares reviewed source configurations and evidence.
+The collapsed **More planning tools / optional** entry retains Agentic **Alternatives**
+and **Benchmark tests**. Alternatives compares reviewed source configurations and evidence.
 
 For Agentic plans, **Benchmark tests** is a separate optional view. Prepare a
 test-enabled plan there before selecting the workload and confirming tests.
@@ -108,7 +131,8 @@ Use **Rebuild plan** to apply overrides. The collapsed **Planning log** retains
 diagnostic events; Manual has no redundant single **Plan** navigation button.
 The current plan remains available until a replacement is
 created; **Keep existing plan** returns to it. A new configuration revision requires
-new review. **Deploy** opens one confirmation for the exact displayed configuration.
+new review. **Review & deploy** opens one review for the exact displayed configuration.
+Use **Confirm deployment** to submit; a changed checksum requires a fresh review.
 After confirmation, **Deployment execution** shows the actual Deploy
 run and component states, attempts and failures. Open **View Pods & Logs** when an
 execution record is available, or **Open deployment** to open the filtered
@@ -150,7 +174,8 @@ are no longer supported.
 
 ## Open the deployment creation flow
 
-Manual proceeds directly to **Deployment plan**; Agentic can first enter goals.
+Manual proceeds directly to **Deployment plan**; Agentic first offers an objective,
+with all numeric parameters optional.
 No request lengths, prefix reuse or workload shape are invented. These are benefit
 hints, not compatibility gates. Agentic
 can interpret explicitly stated qualitative workload traits from a goal when an
@@ -429,7 +454,7 @@ Use node parameter actions or **All deployment parameters**, then **Apply change
 and check resources**. Manual and Agentic both preserve the reviewed source bundle;
 the editor does not silently send parameter changes to an LLM or substitute another
 candidate. Explicitly rebuilding workload requirements requests a new recommendation.
-Selecting an alternative is not deployment; **Deploy** still requires confirmation.
+Selecting an alternative is not deployment; **Review & deploy** still requires confirmation.
 
 ## Measure and compare Agentic candidates
 

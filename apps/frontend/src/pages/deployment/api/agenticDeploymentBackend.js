@@ -1,4 +1,5 @@
 import { streamSseRequest } from '../../../shared/api/sse.js';
+import yaml from 'js-yaml';
 
 export const DEFAULT_REQUIREMENTS = {
     objective: 'balanced', maxAccelerators: '', ttftMs: '', tpotMs: '', e2eMs: '', p95InputTokens: '', providerRef: '', plannerPrompt: '',
@@ -142,4 +143,66 @@ export function streamAgenticRecommendation(payload, onEvent, signal) {
 
 export function streamAgenticRefinement(runId, payload, onEvent, signal) {
     return streamSseRequest(`/api/agentic-deployments/${encodeURIComponent(runId)}/refine/stream`, payload, onEvent, signal);
+}
+
+// Explicit browser-only fixture. No cluster record, session, or deployment API is created.
+export const DEPLOYMENT_PREVIEW = Object.freeze({
+    id: 'intel-xpu', label: 'Intel XPU', model: 'Qwen/Qwen3-0.6B',
+    clusterId: 'mock-intel-xpu', clusterName: 'Intel XPU sandbox',
+    nodes: 2, devices: 4, deviceModel: 'Intel Arc Pro B60', memoryGiB: 24,
+});
+
+export function mockEnvironmentFromProfiles(profiles) {
+    const profile = profiles.find(item => item.id === DEPLOYMENT_PREVIEW.id);
+    const resourceName = profile?.deployment?.modes?.plugin?.resource_names?.at(-1);
+    if (!profile?.deployment?.runtime_image || !resourceName) throw new Error('The registered hardware profile is unavailable. Retry loading the mock environment.');
+    return { ...DEPLOYMENT_PREVIEW, profile, resourceName, accessMode: 'plugin' };
+}
+
+export function createMockDeploymentPlan(draft, mode, objective = 'balanced', overrides = {}) {
+    const environment = draft.preview;
+    if (!environment || draft.model !== DEPLOYMENT_PREVIEW.model) throw new Error('This mock scenario uses Qwen3-0.6B. Reopen the mock environment.');
+    const defaults = {
+        replicas: mode === 'manual' || objective === 'latency' ? 1 : objective === 'throughput' ? 4 : 2,
+        tp: 1, maxModelLen: 4096, maxNumSeqs: objective === 'latency' ? 32 : 256,
+        prefixCaching: true, chunkedPrefill: true,
+    };
+    const settings = { ...defaults, ...overrides };
+    for (const [key, max] of [['replicas', 16], ['tp', 2], ['maxModelLen', 40960], ['maxNumSeqs', 4096]]) {
+        const min = key === 'maxModelLen' ? 256 : 1;
+        if (!Number.isSafeInteger(settings[key]) || settings[key] < min || settings[key] > max) throw new Error(`${key} must be a whole number between ${min} and ${max}.`);
+    }
+    const required = settings.replicas * settings.tp;
+    const labels = { app: 'mock-modelserver' };
+    const annotations = { 'lens-preview': 'mock-only-not-a-validated-deployment' };
+    const args = [draft.model, '--tensor-parallel-size', String(settings.tp), '--max-model-len', String(settings.maxModelLen), '--max-num-seqs', String(settings.maxNumSeqs),
+        settings.prefixCaching ? '--enable-prefix-caching' : '--no-enable-prefix-caching',
+        settings.chunkedPrefill ? '--enable-chunked-prefill' : '--no-enable-chunked-prefill'];
+    const documents = [
+        { apiVersion: 'apps/v1', kind: 'Deployment', metadata: { name: 'mock-modelserver', annotations }, spec: {
+            replicas: settings.replicas, selector: { matchLabels: labels }, template: { metadata: { labels }, spec: {
+                nodeSelector: environment.profile.deployment.node_selector,
+                containers: [{ name: 'modelserver', image: environment.profile.deployment.runtime_image, command: ['vllm', 'serve'], args,
+                    ports: [{ containerPort: 8000 }], resources: { requests: { [environment.resourceName]: settings.tp }, limits: { [environment.resourceName]: settings.tp } },
+                    env: [{ name: 'HF_HOME', value: '/models' }], volumeMounts: [{ name: 'model-cache', mountPath: '/models' }] }],
+                volumes: [{ name: 'model-cache', persistentVolumeClaim: { claimName: 'mock-model-cache' } }],
+            } },
+        } },
+        { apiVersion: 'v1', kind: 'Service', metadata: { name: 'mock-modelserver', annotations }, spec: { selector: labels, ports: [{ port: 8000, targetPort: 8000 }] } },
+    ];
+    return {
+        settings, required, objective,
+        enabled: ['parallel', ...(settings.prefixCaching ? ['prefix'] : []), ...(settings.chunkedPrefill ? ['chunked'] : [])],
+        rationale: mode === 'manual' ? 'All three optimizations covered by this mock are enabled by default.'
+            : objective === 'latency' ? 'Low latency example: one replica with a smaller batch limit.'
+                : objective === 'throughput' ? 'High throughput example: four replicas use the mock device budget.'
+                    : 'Balanced example: two replicas leave two devices available.',
+        yaml: '# MOCK ONLY — model-server excerpt, not a complete llm-d release.\n# Gateway, EPP, model-cache contents and runtime compatibility are not validated.\n' + documents.map(doc => yaml.dump(doc, { lineWidth: -1 })).join('---\n'),
+    };
+}
+
+export function checkMockDeployment(plan, environment, scenario = 'ready') {
+    const available = scenario === 'capacity' ? 0 : environment.devices;
+    return { available, required: plan.required, passed: plan.required <= available,
+        message: plan.required <= available ? 'Mock capacity check passed' : `Needs ${plan.required} devices; ${available} available. Reduce replicas or restore mock capacity.` };
 }

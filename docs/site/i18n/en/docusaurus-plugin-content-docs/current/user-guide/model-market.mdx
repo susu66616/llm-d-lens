@@ -11,8 +11,8 @@ ignores case, and requires every search word to match the model metadata.
 
 | Mode | Decision rule |
 | --- | --- |
-| **Compatible optimizations (Manual)** | Combine applicable, supported optimizations; maximize source-verified coverage and use fewer resources to break ties unless a preference is given. No LLM is called. |
-| **Goal-based recommendation (Agentic)** | Compare validated candidates against the objective, workload and available evidence. An explicitly selected AI provider can propose and rank candidates; fallback is labelled. |
+| **Manual** | Combine applicable, supported optimizations; maximize source-verified coverage and use fewer resources to break ties unless a preference is given. No LLM is called. |
+| **Agentic** | Compare validated candidates against the objective, workload and available evidence. An explicitly selected AI provider can propose and rank candidates; fallback is labelled. |
 
 Both use **Target → Deployment plan → Deploy and observe**. The API mode names remain
 `manual` and `agentic`. Existing deployments,
@@ -25,18 +25,37 @@ do not establish every possible Guide combination.
 
 ## Choose the target
 
-1. Select a model and choose a ready **Cluster**. Lens generates a deployment name;
-   edit **Deployment name** to customize it. Creation has no Notes field.
-2. **Model files** reports whether the selected cache contains the ready model.
-   Expand the cache selector to change **Model cache storage**. Both modes require
-   a registered, ready model cache.
-3. Choose **Compatible optimizations** and **Build deployment plan** to generate
-   immediately, or **Goal-based recommendation** and **Continue to deployment goals**.
+1. Select a model, then choose the prominent **Manual** or **Agentic** card.
+2. Review the compact environment card. A ready cluster is preselected when
+   available; the deployment name is generated. **Change setup** opens cluster,
+   name and model-cache controls together. With no cluster, choose a real target
+   or select **Try Intel XPU mock**.
+3. Manual shows compatible defaults; Agentic shows Balanced, Low latency and
+   High throughput on this same screen. **Build Manual plan** or **Build Agentic plan**
+   opens the generated plan directly. No numeric parameters are required.
+   Use **1–3 Walkthrough** for an overlay on these controls.
 
-Use **Prepare model files** for a missing model, or **Manage model cache** for a ready
-cache. Returning with **Back to model** retains the model, name and strategy while
-availability is refreshed. See [Model Cache](/user-guide/model-cache) and
-[Storage](/user-guide/storage).
+Use **Prepare model cache** when files are missing. See
+[Model Cache](/user-guide/model-cache) and [Storage](/user-guide/storage).
+
+### Explore without hardware
+
+**Try Intel XPU mock** opens Qwen3-0.6B with two simulated nodes, four Intel Arc
+Pro B60 devices (24 GiB each) and a ready mock cache. Image and device resource
+names come from the registered hardware profile. No cluster or cache is created.
+Manual starts the plan immediately; Agentic asks for one objective and uses a
+labelled illustrative rule. Neither mode calls an AI provider or predicts performance.
+
+Follow **Serving flow → expand a group → configure a setting → Review & simulate**: inspect stage-scoped settings,
+toggle prefix caching or chunked prefill, edit replicas/TP and engine limits,
+and view/download the matching mock model-server YAML excerpt. This fixture
+covers three engine settings, not every Guide or a complete llm-d release.
+The review dialog contains the YAML, checks and a collapsed **Mock scenario** selector.
+**Confirm simulation** starts the local simulation. The logical request flow is reused from the live planner; it is not a validated
+mock routing installation. **Insufficient capacity** blocks simulation;
+**Restore mock capacity** returns to the ready scenario. Confirming runs three
+local startup states and never submits a deployment API request. Use
+**Use a real cluster** to leave preview mode. **1–3 Walkthrough** explains the steps.
 
 The initial context length is the model card's exact `contextLength`, with `4096`
 used only when absent. Supported values are `256` through `1048576`; no silent
@@ -46,20 +65,20 @@ initial deployment inputs.
 
 ## Enter requirements
 
-Use **Build deployment plan**; there is no Guide or deployment-method selector.
-Optional **Workload and constraints** records request lengths, concurrency or QPS, latency
+Use **Build Manual plan** or **Build Agentic plan**; there is no Guide selector.
+Collapsed optional sections record request lengths, concurrency or QPS, latency
 targets and an accelerator usage ceiling. All start unspecified. Model context
 is not treated as observed input length, and mean input and P95 remain independent.
 The backend discovers hardware and chooses runtime settings.
 
-Manual needs no workload questionnaire or LLM. Agentic shows structured limits first;
-expand **AI assistance** for an optional natural-language goal and an explicitly
+Manual needs no workload questionnaire or LLM. Agentic shows the objective first;
+expand **Describe a goal** for an optional natural-language goal and an explicitly
 selected **AI provider**. Saved goals keep this section expanded. It extracts only
 explicit qualitative workload traits, displays the interpretation and preserves
 structured values over AI guesses. Numeric limits are not inferred. Without an AI
 provider, use structured inputs and rule-based recommendations.
 Unknown or low expected reuse does not block compatible optimization combinations.
-The default tradeoff is **No preference**, not throughput. Existing saved inputs
+The default tradeoff is **Balanced**, not throughput. Existing saved inputs
 remain intact. Agentic retains three recommendations by default; planning has a
 60-minute deadline and no automatic trials.
 
@@ -94,20 +113,36 @@ reported as errors, not silently replaced by unconstrained estimates.
 
 ## Review and edit
 
-- The human-readable model title and separately labelled model repository and
-  cluster replace the generated deployment name as the heading. The name remains
-  available under **Deployment target details** and editable through **Change target**.
-- The shared workbench defaults to **2D optimization flow**. Optimizations attach
-  to the stages they affect; combined serving uses one Prefill + Decode node.
-  Click a node to edit its parameters in the side panel, or use its power button
-  to enable or disable it. Unsupported and dependency-controlled nodes explain
-  their restrictions. The graph is configuration, not measured performance.
-  **3D technical view** is optional; the resource and confirmation summary remains below.
+- One header identifies **Manual plan** or **Agentic plan**, model and cluster.
+  **Change setup** returns to the environment and deployment-name controls.
+  A compact strip summarizes topology, resources, optimizations and validation.
+- The **Serving flow** shows a horizontal Request → Endpoint selection → Prefill → Decode → Response path.
+  Combined serving places both compute phases inside one Model server boundary; P/D uses separate boundaries.
+  Cache indexing, KV cache, compute configuration and service management connect to the stages they affect.
+  These are logical processing and configuration relationships, not live traffic or measured placement.
+
+  Every functional group is visible, with configured counts and a short summary. Select a group to expand
+  its optimizations inside the diagram, including off and unavailable entries. Each group has its own pages
+  of up to four settings; expanding another group collapses the previous one. Select an optimization to open
+  its source, router or runtime parameters in a configuration drawer. **Stage parameters** inside an expanded group opens broader settings such as replicas, when declared by the source. Supported toggles and detailed editors
+  use the existing compatibility checks. Unavailable settings explain their status and remain read-only.
+  There is no separate Stage configuration table or global All settings visibility switch.
+  Apply edited parameters and check resources before reviewing deployment. Closing the drawer keeps unapplied
+  changes visible in the plan; discard them explicitly if needed. Narrow screens can scroll the diagram horizontally.
+  The optional **3D technical view** retains the infrastructure topology.
+
+  Use **Refine with Agentic** when the current plan does not fit your goal. Choose an objective and optionally
+  adjust the existing workload and limits. The same model, cluster and runtime inputs are carried into a separate
+  recommendation; exact source edits remain in the previous plan. **Return to previous plan** restores that saved
+  plan without regenerating it. Apply or discard pending edits first. Recommendations still require resource checks
+  and explicit deployment confirmation; no performance result is implied. This return history lasts while the setup
+  page remains open. The mock supports objective selection only and uses simulated rules. Prefix caching and Chunked prefill expose an **Enabled / Disabled** control with an argument preview. **Apply changes** updates the mock plan and YAML; **Cancel** discards that edit. Other unsupported mock settings explain why they are unavailable.
 - **Technical details: source Guides and all parameters** contains the complete
   pinned Guide index, including unsupported entries and their reasons. Selected
   Guides retain their choices and variables. Prefix affinity and precise indexing
   remain separate optimization points.
-- The side panel edits only the selected node's source, router or runtime fields.
+- The selected optimization opens its source, router or runtime fields in the graph-owned drawer.
+  The optional 3D view retains a side inspector.
   Technical details offers **All deployment parameters** and editable **Final YAML**.
   Unrelated final edits survive optimization changes; conflicting edits block
   application instead of silently disappearing. Undo the conflict or explicitly
@@ -124,8 +159,8 @@ If source loading fails, the workflow shows the actual reason and a retry action
 Legacy runs can **Load Guides and build source configuration** rather than being
 restricted to their old preview. A changed source revision requires explicit
 adoption before edits can be applied. **Workload and limits** still rebuilds
-requirements without modifying a live deployment. Agentic **Alternatives**
-compares reviewed source configurations without claiming unmeasured performance.
+requirements without modifying a live deployment. The collapsed **More planning tools / optional** retains Agentic **Alternatives**
+and **Benchmark tests**. Alternatives compares reviewed source configurations without claiming unmeasured performance.
 
 ## Generate, check and deploy
 
@@ -137,8 +172,9 @@ compares reviewed source configurations without claiming unmeasured performance.
 2. Review warnings, dependencies and pending checks. Rendering does not install
    resources. Admission, readiness and workload performance remain pending.
 3. Choose the reviewed **Inference Service** for the model, not EPP or metrics.
-   **Ready for your confirmation** summarizes the result. Click **Deploy**, then
-   confirm the exact configuration checksum and selected endpoint. Approval refreshes
+   **Review & deploy** opens YAML and checks together. **Ready for your confirmation**
+   summarizes the result; **Confirm deployment** approves the exact configuration
+   checksum and selected endpoint. A changed snapshot requires a new review. Approval refreshes
    capacity and submits the manifest through the common deployment lifecycle.
 4. **Deployment execution** shows the reported component states and log actions.
    The summary says **Deployment ready** only when the execution has succeeded and

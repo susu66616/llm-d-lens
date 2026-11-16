@@ -28,7 +28,7 @@ export function InferenceDesigner({ initialDraft, initialResult, clusterName, di
     const [loading, setLoading] = useState(true), [error, setError] = useState('');
     const [dirty, setDirty] = useState(false), [saving, setSaving] = useState(false);
     const [mapView, setMapView] = useState('2d');
-    const [selected, setSelected] = useState(null), [parameters, setParameters] = useState(null);
+    const [selected, setSelected] = useState('routing'), [parameters, setParameters] = useState(null);
     const [focus, setFocus] = useState(null), [reload, setReload] = useState(0);
     const select = useCallback(id => { setSelected(id); if (id) setFocus({ id }); else setParameters(null); }, []);
     useEffect(() => {
@@ -98,7 +98,7 @@ export function InferenceDesigner({ initialDraft, initialResult, clusterName, di
     const configure = id => {
         select(id);
         const item = [...graph.nodes, ...graph.capabilities].find(item => item.id === id);
-        setParameters(!locked && item && canConfigure(item) ? 'node' : null);
+        setParameters(!locked && item && !item.unavailable && canConfigure(item) ? 'node' : null);
     };
     const save = async () => {
         if (locked) return;
@@ -107,34 +107,23 @@ export function InferenceDesigner({ initialDraft, initialResult, clusterName, di
         catch (reason) { setError(reason.message); }
         finally { setSaving(false); }
     };
-    return <section aria-label="Source deployment configuration" className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-            <div><h3 className="text-lg font-semibold">Deployment configuration</h3><p className="text-sm text-theme-muted">Compatible optimizations are combined within your requirements. Click a stage or optimization to edit it; use its power button to enable or disable it.</p></div>
-        </div>
-        {loading && <LoadingState label="Loading revision-owned Guides and hardware" />}
-        {error && <p role="alert" className="text-sm">{error} {!catalog && <Button size="xs" variant="secondary" onClick={() => setReload(value => value + 1)}>Retry source catalog</Button>}</p>}
-        {stale && <div role="alert" className="space-y-2 text-sm"><p>The cluster source revision changed. This saved configuration remains visible, but edits cannot be applied against a different revision.</p><Button variant="secondary" disabled={disabled || saving} onClick={() => {
-            setIntent(current => ({ ...current, sourceCommit: catalog.commit, sourceUnits: [], finalConfiguration: undefined, sourceRouter: { ...current.sourceRouter, values: [] } }));
-            setDirty(true);
-        }}>Use current revision and discard source edits</Button></div>}
-        {dirty && <p role="status" className="text-sm text-theme-muted">Unapplied changes. Deployment is blocked until this exact configuration passes resource checks.</p>}
-        <div className={cn('inference-designer inference-workflow', mapView === '2d' && 'inference-workflow-2d')}>
-            <div className="inference-view-switch inference-glass" role="group" aria-label="Configuration view">
-                {['2d', '3d'].map(view => <Button key={view} size="xs" variant="ghost" aria-pressed={mapView === view} onClick={() => setMapView(view)}>{view === '2d' ? '2D optimization flow' : '3D technical view'}</Button>)}
-                <Badge size="xs">{dirty ? 'Draft topology' : 'Reviewed source topology'}</Badge>
+    const applyActions = dirty && <div id="deployment-apply" className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-theme-muted">{dirty ? 'Changes need resource checks; previous performance evidence will not carry over.' : 'Reviewed configuration.'}</p>
+            <div className="flex gap-2">
+                {dirty && <Button variant="ghost" disabled={disabled || saving} onClick={() => { setIntent({ ...createBlueprint(), ...initialDraft }); setDirty(false); setParameters(null); setError(''); }}>Discard changes</Button>}
+                <Button disabled={locked || !can('guide:plan:execute') || !can('configuration:artifact:render')} isLoading={saving} onClick={save}>{dirty ? 'Apply changes and check resources' : 'Recheck source configuration'}</Button>
             </div>
-            {mapView === '3d' ? <InferenceFlowMap draft={display} clusterName={clusterName} selected={selected} onSelect={configure} visible={TIERS.map(tier => tier.id)} focus={focus} profile={profile} result={result} catalog={catalog} blockedReason={blocked[selected]} onActivate={activate} canConfigure={canConfigure} onConfigure={() => setParameters('node')} onTarget={() => setParameters('all')} />
-                : <InferenceFlowMap2D graph={graph} selected={selected} onSelect={select} onActivate={activate} onConfigure={configure} canConfigure={canConfigure} blocked={blocked} intent={draft.deploymentIntent} hardware={result?.plan?.validation?.hardware} disabled={locked} />}
-            <aside className="inference-inspector inference-glass" aria-label="Optimization settings">
-                <div className="inference-panel-heading"><span>{entity?.label || 'Optimization settings'}</span>{entity && <Button variant="ghost" size="icon" aria-label="Close optimization settings" onClick={() => { select(null); setParameters(null); }}><X size={14} /></Button>}</div>
+        </div>;
+    const inspector = <aside id="deployment-optimization-settings" className={cn(mapView === '3d' && 'inference-inspector inference-glass')} aria-label="Optimization settings">
+                {mapView === '3d' && <div className="inference-panel-heading"><span>{entity?.label || 'Optimization settings'}</span>{entity && <Button variant="ghost" size="icon" aria-label="Close optimization settings" onClick={() => { select(null); setParameters(null); }}><X size={14} /></Button>}</div>}
                 <div className="space-y-4 p-4">
+                    {mapView === '2d' && error && <p role="alert" className="text-sm">{error}</p>}
                     {!entity ? <p className="text-sm text-theme-muted">Select an optimization in the flow to see why it is enabled, change its parameters or turn it off. Supporting optimizations connect to the stage they affect, not additional request hops.</p> : <>
                         <p className="text-sm text-theme-muted">{entity.detail}</p>
                         {entity.kind === 'capability' && <>
                             <Badge tone={entity.configurationState === 'mixed' ? 'warning' : entity.enabled ? 'success' : 'neutral'}>{entity.configurationState === 'mixed' ? 'Partially configured' : entity.enabled ? 'Enabled' : 'Not enabled'}</Badge>
                             <p className="text-sm">{blocked[entity.id] || entity.sourceReason || draft.optimizationDecisions?.find(item => item.id === entity.id)?.reason || entity.reason}</p>
-                            <p className="text-xs text-theme-muted">Configuration support does not establish a performance benefit. Validate with your workload.</p>
-                            <Button variant="secondary" disabled={locked || Boolean(blocked[entity.id]) || !capabilityTogglePatch(entity, draft)} onClick={() => activate(entity.id)}>{entity.enabled ? 'Disable' : 'Enable'} {entity.label}</Button>
+                            {!(parameters === 'node' && ['prefix', 'chunked'].includes(entity.id)) && <Button variant="secondary" disabled={locked || Boolean(blocked[entity.id]) || !capabilityTogglePatch(entity, draft)} onClick={() => activate(entity.id)}>{entity.enabled ? 'Disable' : 'Enable'} {entity.label}</Button>}
                         </>}
                         {parameters === 'node' && <fieldset disabled={locked} className="min-w-0 space-y-4">
                             {entity.id === 'cache' && draft.nativeCpuCacheGiB != null && <label className="block text-sm">CPU KV cache per replica (GiB)
@@ -147,20 +136,30 @@ export function InferenceDesigner({ initialDraft, initialResult, clusterName, di
                             </label>}
                             <InferenceSourceComposer key={entity.id} draft={draft} change={change} catalog={catalog} entity={entity} assetPaths={nodeParameterPaths(entity, draft)} loading={loading} error={error} controlsOnly={Boolean(draft.runtimeConfiguration)} />
                             {draft.runtimeConfiguration && nodeResourceKinds(entity)?.[0] !== 'values' && <InferenceDeploymentParameters key={entity.id} draft={draft} change={change} entity={entity} />}
-                            <Button variant="ghost" onClick={() => setParameters(null)}>Finish editing</Button>
+                            {mapView === '3d' && <Button variant="ghost" onClick={() => setParameters(null)}>Finish editing</Button>}
                         </fieldset>}
-                        {parameters !== 'node' && canConfigure(entity) && <Button variant="secondary" disabled={locked} onClick={() => setParameters('node')}><Settings2 size={14} />Edit parameters</Button>}
+                        {parameters !== 'node' && !entity.unavailable && canConfigure(entity) && <Button variant="secondary" disabled={locked} onClick={() => setParameters('node')}><Settings2 size={14} />Edit parameters</Button>}
                     </>}
                 </div>
-            </aside>
-        </div>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-sm text-theme-muted">{dirty ? 'Changes need resource checks; previous performance evidence will not carry over.' : 'Review resource use and checks below before confirming deployment.'}</p>
-            <div className="flex gap-2">
-                {dirty && <Button variant="ghost" disabled={disabled || saving} onClick={() => { setIntent({ ...createBlueprint(), ...initialDraft }); setDirty(false); setParameters(null); setError(''); }}>Discard changes</Button>}
-                <Button disabled={locked || !can('guide:plan:execute') || !can('configuration:artifact:render')} isLoading={saving} onClick={save}>{dirty ? 'Apply changes and check resources' : 'Recheck source configuration'}</Button>
+            </aside>;
+    return <section aria-label="Source deployment configuration" className="space-y-3">
+        {loading && <LoadingState label="Loading revision-owned Guides and hardware" />}
+        {error && <p role="alert" className="text-sm">{error} {!catalog && <Button size="xs" variant="secondary" onClick={() => setReload(value => value + 1)}>Retry source catalog</Button>}</p>}
+        {stale && <div role="alert" className="space-y-2 text-sm"><p>The cluster source revision changed. This saved configuration remains visible, but edits cannot be applied against a different revision.</p><Button variant="secondary" disabled={disabled || saving} onClick={() => {
+            setIntent(current => ({ ...current, sourceCommit: catalog.commit, sourceUnits: [], finalConfiguration: undefined, sourceRouter: { ...current.sourceRouter, values: [] } }));
+            setDirty(true);
+        }}>Use current revision and discard source edits</Button></div>}
+        {dirty && <p role="status" className="text-sm text-theme-muted">Unapplied changes. Deployment is blocked until this exact configuration passes resource checks.</p>}
+        <div className={cn('inference-designer inference-workflow', mapView === '2d' && 'inference-workflow-2d')}>
+            <div className="inference-view-switch inference-glass" role="group" aria-label="Configuration view">
+                {['2d', '3d'].map(view => <Button key={view} size="xs" variant="ghost" aria-pressed={mapView === view} onClick={() => setMapView(view)}>{view === '2d' ? 'Serving flow' : '3D technical view'}</Button>)}
+                <Badge size="xs">{dirty ? 'Draft topology' : 'Reviewed source topology'}</Badge>
             </div>
+            {mapView === '3d' ? <InferenceFlowMap draft={display} clusterName={clusterName} selected={selected} onSelect={configure} visible={TIERS.map(tier => tier.id)} focus={focus} profile={profile} result={result} catalog={catalog} blockedReason={blocked[selected]} onActivate={activate} canConfigure={canConfigure} onConfigure={() => setParameters('node')} onTarget={() => setParameters('all')} />
+                : <InferenceFlowMap2D graph={graph} selected={selected} onSelect={select} onActivate={activate} onConfigure={configure} canConfigure={canConfigure} blocked={blocked} intent={draft.deploymentIntent} hardware={result?.plan?.validation?.hardware} disabled={locked} onCloseInspector={() => setParameters(null)} inspectorFooter={parameters === 'node' ? applyActions : null} inspector={entity ? inspector : null} />}
+            {mapView === '3d' && inspector}
         </div>
+        {(mapView === '3d' || parameters !== 'node') && applyActions}
         <details><summary className="cursor-pointer text-sm text-theme-muted">Technical details: source Guides and all parameters</summary>
             <Panel className="mt-3" title="Advanced source configuration">
                 <fieldset disabled={locked} className="space-y-3">
