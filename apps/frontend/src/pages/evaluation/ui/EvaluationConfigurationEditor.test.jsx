@@ -71,7 +71,13 @@ for (const entrySource of ['model-market', 'evaluation-setup']) {
         assert.match(html, /value="2"/);
         assert.match(html, /aria-label="Edit setup"/);
         assert.match(html, /Generate YAML/);
+        assert.match(html, /Configuration source/);
+        assert.doesNotMatch(html, /Generate complete plan|Deployment requirements and plan/);
         if (entrySource === 'model-market') assert.doesNotMatch(html, /id="optimizationSelection"/);
-        else assert.match(html, /id="optimizationSelection"/);
+        else {
+            assert.match(html, /id="optimizationSelection"/);
+            assert.match(html, /aria-pressed="true" aria-label="Compare Direct vLLM:/);
+            assert.match(html, /1 scenarios selected/);
+        }
     });
 }

@@ -353,7 +353,8 @@ async def test_local_source_cannot_escape_allowed_root(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("kubernetes_mode", ["disabled", "required"])
-def test_plan_route_emits_validated_bundle_and_preserves_response(monkeypatch, tmp_path, kubernetes_mode):
+@pytest.mark.parametrize("completion", [False, True])
+def test_plan_route_emits_validated_bundle_and_preserves_response(monkeypatch, tmp_path, kubernetes_mode, completion):
     from unittest.mock import AsyncMock
 
     import yaml
@@ -364,7 +365,10 @@ def test_plan_route_emits_validated_bundle_and_preserves_response(monkeypatch, t
 
     monkeypatch.delenv("PRISM_GPU_PCI_ALLOWLIST", raising=False)
     manifest_path = tmp_path / "model.yaml"
-    manifest_path.write_text(yaml.safe_dump(deployment()))
+    source = deployment()
+    if completion:
+        source['spec']['template']['spec']['containers'][0]['args'].append('--no-enable-prefix-caching')
+    manifest_path.write_text(yaml.safe_dump(source))
     router_root = tmp_path / "guides/optimized-baseline/router"
     router_root.mkdir(parents=True)
     (router_root / "optimized-baseline.values.yaml").write_text("router: {epp: {replicas: 1}}")
@@ -397,6 +401,7 @@ def test_plan_route_emits_validated_bundle_and_preserves_response(monkeypatch, t
     response = TestClient(app).post(
         "/api/guide-planning/plan",
         json={
+            "optimizationPolicy": {"mode": "manual", "prefixReuse": "yes"} if completion else None,
             "guide": "optimized-baseline",
             "accelerator": "gpu",
             "modelServer": "vllm",
@@ -415,8 +420,35 @@ def test_plan_route_emits_validated_bundle_and_preserves_response(monkeypatch, t
         assert result["summary"]["availableAccelerators"] == 4
     assert result["validation"]["errors"] == []
     assert result["plannedDeployment"]["format"] == "yaml"
+    if completion:
+        assert result['optimizationDecisions'][0]['status'] == 'enabled'
+        assert '--enable-prefix-caching' in result['plannedDeployment']['content']
+        assert '--no-enable-prefix-caching' not in result['plannedDeployment']['content']
+    else:
+        assert result['optimizationDecisions'] == []
     assert "total;dur=" in response.headers["server-timing"]
     validate_deployment_bundle(result["deploymentBundle"], "optimized-baseline", result["source"]["commit"])
+    if kubernetes_mode == "disabled" and not completion:
+        monkeypatch.setattr(
+            guide_bundle,
+            "build_guide_deployment_bundle",
+            AsyncMock(side_effect=ValueError("Prefix routing plugin conflicts with the selected topology.")),
+        )
+        incompatible = TestClient(app).post(
+            "/api/guide-planning/plan",
+            json={
+                "guide": "optimized-baseline",
+                "accelerator": "gpu",
+                "modelServer": "vllm",
+                "model": "example/model",
+                "environment": {"kubernetesMode": "disabled"},
+                "replicas": 1,
+                "tensorParallelSize": 1,
+                "source": {"mode": "local", "path": str(manifest_path)},
+            },
+        )
+        assert incompatible.status_code == 400
+        assert incompatible.json()["error"] == "Prefix routing plugin conflicts with the selected topology."
 
 
 def test_plan_rejects_expired_explicit_session_with_discovery_disabled(monkeypatch):

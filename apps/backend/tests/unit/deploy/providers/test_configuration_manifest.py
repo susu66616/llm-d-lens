@@ -1388,3 +1388,34 @@ async def test_render_enforces_single_slice_disaggregated_set(monkeypatch, tmp_p
     document = yaml.safe_load(Path(artifact.manifest_ref).read_text())
     assert document["spec"]["slices"] == 1
     assert artifact.deployment_contract["disaggregatedSet"]["slices"] == 1
+
+
+@pytest.mark.asyncio
+async def test_native_cpu_cache_composition_renders_before_deploy(monkeypatch, tmp_path):
+    from llm_d_lens.deploy import guide_planning
+    base = {'kind': 'Deployment', 'metadata': {'name': 'model'}, 'spec': {'template': {'spec': {'containers': [{'name': 'modelserver', 'image': 'runtime:1', 'args': ['model']}]}}}}
+    source = tmp_path / 'base.yaml'
+    source.write_text(yaml.safe_dump(base))
+    donor = json.loads(json.dumps(base))
+    donor['spec']['template']['spec']['containers'][0]['args'] += ['--kv-transfer-config', json.dumps({'kv_connector': 'OffloadingConnector', 'kv_role': 'kv_both', 'kv_connector_extra_config': {'cpu_bytes_to_use': 1024**3}})]
+    runner = AsyncMock(return_value=(0, yaml.safe_dump(donor), ''))
+    monkeypatch.setattr(guide_planning, 'select_manifest_paths', lambda *args: {'guidePath': 'guides/cache'})
+    delegate = SimpleNamespace(_guide_root=tmp_path, _accelerator='gpu', render=AsyncMock(return_value=GuideDeploymentArtifact(guide_id='optimized-baseline', artifact_hash='base', manifest_ref=str(source))))
+    adapter = ConfigurationManifestAdapter(delegate, runner, 'test-', 5, tmp_path / 'output')
+    artifact = await adapter.render(GuideDefinition('optimized-baseline', 'revision', 'hash', 'stable'), {'guideComposition': {'nativeCpuCacheGiB': 4}})
+    rendered = Path(artifact.manifest_ref).read_text()
+    assert 'OffloadingConnector' in rendered
+    assert str(4 * 1024**3) in rendered
+    assert 'OffloadingConnector' not in source.read_text()
+    deployment = next(
+        document for document in yaml.safe_load_all(rendered)
+        if document.get("kind") == "Deployment" and document["metadata"]["name"] == "model"
+    )
+    pod = deployment["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    assert pod["terminationGracePeriodSeconds"] == 120
+    assert "--shutdown-timeout=90" in container["args"]
+    assert container["lifecycle"]["preStop"]["exec"]["command"] == ["/bin/sh", "-c", "sleep 5"]
+    kv_config = json.loads(container["args"][container["args"].index("--kv-transfer-config") + 1])
+    assert kv_config["kv_load_failure_policy"] == "recompute"
+    runner.assert_awaited_once()

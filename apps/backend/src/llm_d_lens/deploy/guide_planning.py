@@ -11,9 +11,10 @@ import time
 from copy import deepcopy
 
 import yaml
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
+from llm_d_lens.configuration.optimization_policy import resolve_optimization_policy
 from llm_d_lens.configuration.manifest_facts import _invocation_tokens, workload_roles
 from llm_d_lens.core.exceptions import DomainError
 from llm_d_lens.hardware.registry import all_profiles
@@ -955,6 +956,74 @@ def deployment_contract(documents: list[dict], guide: str) -> dict:
     }
 
 
+async def source_response(operation):
+    try:
+        return await operation
+    except GuideError as error:
+        logger.warning("Source composition rejected: %s", error)
+        return JSONResponse({"error": error.public_message}, status_code=error.status)
+    except (OSError, TimeoutError, ValueError):
+        logger.exception("Source composition failed")
+        return JSONResponse({"error": "Source composition failed; inspect server logs."}, status_code=502)
+
+
+@router.get(
+    "/source-catalog", operation_id="get_deployment_source_catalog",
+    summary="Inspect the selected cluster's pinned Guide sources",
+    description="Return Guide recipes, source units, parameters and the full optimization catalog for clusterId. "
+    "Requires cluster access and a clean downloaded source revision. Does not run Guide scripts or deploy resources.",
+)
+async def source_catalog(request: Request, cluster_id: str = Query(alias="clusterId")):
+    from .source_catalog import authorized_inventory
+
+    async def load():
+        _, result = await authorized_inventory(request, {"clusterId": cluster_id})
+        return result
+
+    return await source_response(load())
+
+
+@router.post(
+    "/source-preview", operation_id="preview_deployment_source",
+    summary="Render one pinned source component for parameter editing",
+    description="Provide clusterId, commit and unit to render a selected resource, Kustomize component or chart. "
+    "Return rendered documents and observed optimization flags without deploying. Reject a changed revision "
+    "or inputs outside the authorized source catalog.",
+)
+async def source_preview(request: Request, body: dict):
+    from .source_catalog import authorized_inventory
+    from .source_composition import render_unit, rendered_optimizations
+
+    async def preview():
+        if not re.fullmatch(r"[a-f0-9]{40}", body.get("commit", "")):
+            raise GuideError("Pin the catalog commit before previewing.")
+        root, inventory = await authorized_inventory(request, body)
+        if not isinstance(body.get("unit"), dict):
+            raise GuideError("Select a source unit.")
+        rendered = await render_unit(root, inventory, body["unit"])
+        return {**rendered, "optimizations": rendered_optimizations(rendered["documents"], inventory["commit"])}
+
+    return await source_response(preview())
+
+
+@router.post(
+    "/compose", operation_id="compose_deployment_sources",
+    summary="Compose selected Guide sources and edited parameters",
+    description="Render 1-60 pinned source units and router values for an authorized cluster and ready model cache. "
+    "Validate parameters, resource conflicts and current device limits; optionally run an admission dry-run. "
+    "DRA sizing supports generated ExactCount ResourceClaimTemplates and one matching cluster hardware profile; "
+    "external claims and ambiguous allocations are rejected. Device demand includes replicas and autoscaler ceilings. "
+    "Managed source deployment permits only Router ClusterRoles creating TokenReviews/SubjectAccessReviews and "
+    "bindings to the deployment's EPP ServiceAccount; arbitrary cluster-scoped provisioning remains unsupported. "
+    "Return deployment YAML, provenance and effective optimization evidence. Never deploy or mutate existing "
+    "workloads. Stale source/final-edit checksums return 409; invalid inputs and compatibility failures return 400.",
+)
+async def source_compose(request: Request, body: dict):
+    from .source_composition import compose
+
+    return await source_response(compose(request, body))
+
+
 @router.get("/catalog")
 async def catalog(request: Request):
     from .guide_sources import catalog_from_paths, load_guide_paths
@@ -1002,6 +1071,11 @@ async def prepare(request: Request):
 
 @router.post("/plan")
 async def plan(request: Request):
+    return await plan_resources(request, await request.json())
+
+
+async def plan_resources(request: Request, body: dict):
+    """Render the same source-bound resources for interactive and deployment-plan callers."""
     from .guide_bundle import build_guide_deployment_bundle
     from .guide_sources import (
         discover_local_cluster,
@@ -1029,7 +1103,6 @@ async def plan(request: Request):
             timings[name] = round((time.monotonic() - began) * 1000)
 
     try:
-        body = await request.json()
         guide, accelerator, model_server, model = (
             str(body.get(key) or "").strip() for key in ("guide", "accelerator", "modelServer", "model")
         )
@@ -1071,6 +1144,36 @@ async def plan(request: Request):
         render_started = time.monotonic()
         documents = [document for document in yaml.safe_load_all(manifest["rendered"]) if document]
         planned = plan_documents(documents, model, machine, detected_cluster, body)
+        try:
+            body, optimization_decisions = resolve_optimization_policy(body, planned["documents"])
+        except ValueError as error:
+            raise GuideError(str(error)) from error
+        composition = body.get("guideComposition")
+        if composition:
+            from llm_d_lens.configuration.guide_composition import compose_native_cpu_cache
+
+            if not isinstance(composition, dict) or set(composition) != {"nativeCpuCacheGiB"}:
+                raise GuideError("Unknown Guide composition; select a supported CPU cache composition.")
+            if body.get("modelServer") != "vllm" or (body.get("source") or {}).get("mode", "official") != "official":
+                raise GuideError("Guide composition requires a pinned official vLLM source.")
+            donor_request = {
+                **body, "guide": "tiered-prefix-cache", "guideVariant": "native/cpu",
+                "source": {"mode": "official"},
+            }
+            try:
+                donor = await load_selected_manifests(request, donor_request)
+            except GuideError as error:
+                if error.status != 404:
+                    raise
+                donor = await load_selected_manifests(request, {**donor_request, "guideVariant": "native/cpu/base"})
+            if donor["source"]["commit"] != manifest["source"]["commit"]:
+                raise GuideError("Composed Guides must come from the same source revision.")
+            try:
+                planned["documents"] = compose_native_cpu_cache(planned["documents"], list(yaml.safe_load_all(donor["rendered"])), guide=guide, capacity_gib=composition["nativeCpuCacheGiB"])
+            except (ValueError, TypeError) as error:
+                raise GuideError(str(error)) from error
+            optimization_decisions = [item for item in optimization_decisions if item["id"] != "tiered-prefix-cache"]
+            optimization_decisions.append({"id": "tiered-prefix-cache", "label": "Native CPU KV cache", "status": "composed", "reason": f"Composed from the same source revision; {composition['nativeCpuCacheGiB']} GiB of additional host memory requested per model replica. Performance awaits measurement; NIXL P/D uses ordered transport and per-role local cache connectors, checked in the runtime image before startup."})
         if accelerator != resolved:
             planned["validation"]["warnings"].append(
                 f'Guide accelerator variant corrected from "{accelerator}" to "{resolved}" '
@@ -1080,6 +1183,16 @@ async def plan(request: Request):
         applied = apply_custom_patches(
             planned["documents"], patches, planned["validation"]["errors"], planned["validation"]["warnings"]
         )
+        if composition:
+            from llm_d_lens.configuration.guide_settings import validate_configuration_extensions
+
+            try:
+                validate_configuration_extensions(
+                    {"officialGuide": {"source": {"guide": guide}}, "guideComposition": composition},
+                    yaml.safe_dump_all(planned["documents"]),
+                )
+            except (ValueError, TypeError) as error:
+                planned["validation"]["errors"].append(str(error))
         planned["summary"]["requestedAccelerators"] = validate_manifest_capacity(
             planned["documents"],
             planned["summary"]["availableAccelerators"],
@@ -1105,17 +1218,21 @@ async def plan(request: Request):
                 len(block_sizes) != len(servers) or len(set(block_sizes)) != 1
             ):
                 raise ValueError("Precise routing requires matching block sizes on all model servers.")
-            bundle = await measure(
-                "bundle",
-                build_guide_deployment_bundle(
-                    guide,
-                    manifest,
-                    model,
-                    resolved,
-                    block_sizes[0] if block_sizes else None,
-                    settings.get("routerValues", ""),
-                ),
-            )
+            try:
+                bundle = await measure(
+                    "bundle",
+                    build_guide_deployment_bundle(
+                        guide,
+                        manifest,
+                        model,
+                        resolved,
+                        block_sizes[0] if block_sizes else None,
+                        settings.get("routerValues", ""),
+                        prefix_routing=body.get("prefixRouting"),
+                    ),
+                )
+            except (TypeError, ValueError) as error:
+                raise GuideError(str(error)) from error
         timings["render"] = round((time.monotonic() - render_started) * 1000)
         response = {
             "status": "VERIFIED"
@@ -1140,6 +1257,7 @@ async def plan(request: Request):
             "machineProfile": machine,
             "clusterProfile": detected_cluster,
             "modelConfig": planned["summary"]["modelEstimate"],
+            "optimizationDecisions": optimization_decisions,
             "planningPatch": planned["planningPatch"],
             "appliedCustomPatches": applied,
             "plannedDeployment": {

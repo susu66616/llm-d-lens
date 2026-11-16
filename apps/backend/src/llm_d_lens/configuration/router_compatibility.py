@@ -8,6 +8,71 @@ from copy import deepcopy
 import yaml
 
 
+def compose_prefix_routing(values: dict, donor: dict | None, enabled: bool) -> dict:
+    """Compose source-established affinity plugins without replacing P/D profiles."""
+    result = deepcopy(values)
+
+    def document(source):
+        epp = source.get("router", {}).get("epp", {})
+        key = epp.get("pluginsConfigFile")
+        custom = epp.get("pluginsCustomConfig") or {}
+        config = yaml.safe_load(custom.get(key, ""))
+        if not isinstance(config, dict) or not isinstance(config.get("plugins"), list):
+            raise ValueError("Prefix routing requires an explicit source router plugin configuration.")
+        if not config.get("schedulingProfiles"):
+            raise ValueError("Prefix routing requires source scheduling profiles.")
+        return epp, key, config
+
+    epp, key, config = document(result)
+    cache_types = {"approx-prefix-cache-producer", "prefix-cache-affinity-filter"}
+    if enabled:
+        if donor is None:
+            raise ValueError("Prefix routing requires a pinned affinity plugin source.")
+        source_epp, _, source = document(donor)
+        if source_epp.get("image") != epp.get("image"):
+            raise ValueError("Prefix routing composition requires identical router runtime images.")
+        required = cache_types | {"inflight-load-producer"}
+        additions = [p for p in source["plugins"] if p.get("type") in required]
+        if {p["type"] for p in additions} != required:
+            raise ValueError("The pinned routing source does not establish all affinity dependencies.")
+        by_name = {p.get("name", p["type"]): p for p in config["plugins"]}
+        for plugin in additions:
+            name = plugin.get("name", plugin["type"])
+            if name in by_name and by_name[name] != plugin:
+                raise ValueError(f"Prefix routing plugin {name} conflicts with the selected topology.")
+            if name not in by_name:
+                config["plugins"].append(deepcopy(plugin))
+        affinity = next(p for p in additions if p["type"] == "prefix-cache-affinity-filter")
+        reference = affinity.get("name", affinity["type"])
+        for profile in config["schedulingProfiles"]:
+            # Prefill owns prefix state in P/D; leave decode selection unchanged.
+            if profile.get("name") not in {"default", "prefill"}:
+                continue
+            plugins = profile.get("plugins")
+            if not isinstance(plugins, list):
+                raise ValueError("Prefix routing requires an ordered source scheduling profile.")
+            if not any(p.get("pluginRef") == reference for p in plugins):
+                position = next(
+                    (i for i, p in enumerate(plugins)
+                     if "scorer" in p.get("pluginRef", "") or "picker" in p.get("pluginRef", "")),
+                    len(plugins),
+                )
+                plugins.insert(position, {"pluginRef": reference})
+        if not any(p.get("name") in {"default", "prefill"} for p in config["schedulingProfiles"]):
+            raise ValueError("No supported default or prefill profile can use prefix routing.")
+    else:
+        removed = {p.get("name", p["type"]) for p in config["plugins"] if p.get("type") in cache_types}
+        if any("precise-prefix" in p.get("type", "") for p in config["plugins"]):
+            raise ValueError("Disable precise routing by selecting a load-routed topology.")
+        config["plugins"] = [p for p in config["plugins"] if p.get("name", p["type"]) not in removed]
+        for profile in config["schedulingProfiles"]:
+            profile["plugins"] = [p for p in profile.get("plugins", []) if p.get("pluginRef") not in removed]
+            if not profile["plugins"]:
+                raise ValueError("Disabling prefix routing would leave an empty scheduling profile.")
+    epp["pluginsCustomConfig"][key] = yaml.safe_dump(config, sort_keys=False)
+    return result
+
+
 def compatible_router_values(values: dict, chart_version: str) -> dict:
     """Return Router 0.11 values without modifying the original source snapshot."""
     result = deepcopy(values)

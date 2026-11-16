@@ -191,7 +191,8 @@ def configuration_snapshot(run: dict) -> tuple[DeployableConfiguration, Candidat
             "decode_replicas": decode.get("replicaCount"),
             "prefill_tp": prefill.get("tensorParallelSize"),
             "prefill_replicas": prefill.get("replicaCount"),
-            "optimizations": tuple(filter(None, [content.get("guideVariant")])),
+            "optimizations": tuple(filter(None, [content.get("guideVariant"),
+                f"native-cpu-cache:{content['guideComposition']['nativeCpuCacheGiB']:g}GiB" if content.get('guideComposition') else None])),
         },
         strict=True,
     )

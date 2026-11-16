@@ -119,6 +119,9 @@ ROUTE_PERMISSIONS: tuple[RoutePermission, ...] = (
     RoutePermission("POST", "/api/agentic-deployments/{run_id}/refine", "deployment:agentic:create"),
     RoutePermission("POST", "/api/agentic-deployments/{run_id}/refine/stream", "deployment:agentic:create"),
     RoutePermission("POST", "/api/agentic-deployments/{run_id}/select", "deployment:agentic:create"),
+    RoutePermission("POST", "/api/agentic-deployments/{run_id}/composition", "deployment:agentic:create"),
+    RoutePermission("POST", "/api/agentic-deployments/{run_id}/optimize", "deployment:agentic:approve"),
+    RoutePermission("POST", "/api/agentic-deployments/{run_id}/optimize/cancel", "deployment:agentic:approve"),
     # --- capacity planning ---
     RoutePermission("POST", "/api/v1/capacity/estimate", "deployment:agentic:read"),
     # --- cluster ---
@@ -198,6 +201,7 @@ ROUTE_PERMISSIONS: tuple[RoutePermission, ...] = (
     RoutePermission("GET", "/api/v1/configurations/artifacts/{artifact_id}/bundle", "configuration:artifact:read"),
     RoutePermission("GET", "/api/v1/configurations/artifacts/{artifact_id}/manifest", "configuration:artifact:read"),
     RoutePermission("GET", "/api/v1/configurations/capabilities", "configuration:artifact:read"),
+    RoutePermission("POST", "/api/v1/configurations/plan", "configuration:artifact:render"),
     RoutePermission("POST", "/api/v1/configurations/render", "configuration:artifact:render"),
     RoutePermission("POST", "/api/v1/configurations/resolve", "configuration:artifact:render"),
     RoutePermission("POST", "/api/v1/configurations/save", "configuration:artifact:save"),
@@ -215,6 +219,9 @@ ROUTE_PERMISSIONS: tuple[RoutePermission, ...] = (
     RoutePermission("POST", "/api/remote-deploy/logs", "remote-deploy:deploy:execute"),
     RoutePermission("POST", "/api/remote-deploy/teardown", "remote-deploy:deploy:teardown"),
     RoutePermission("GET", "/api/guide-planning/catalog", "guide:plan:execute"),
+    RoutePermission("GET", "/api/guide-planning/source-catalog", "guide:plan:execute"),
+    RoutePermission("POST", "/api/guide-planning/source-preview", "guide:plan:execute"),
+    RoutePermission("POST", "/api/guide-planning/compose", "guide:plan:execute"),
     RoutePermission("POST", "/api/guide-planning/prepare", "guide:plan:execute"),
     RoutePermission("POST", "/api/guide-planning/plan", "guide:plan:execute"),
     # --- deployments ---
@@ -431,6 +438,9 @@ _NON_SCHEMA_ROUTES: tuple[tuple[str, str], ...] = (
     ("POST", "/api/remote-deploy/logs"),
     ("POST", "/api/remote-deploy/teardown"),
     ("GET", "/api/guide-planning/catalog"),
+    ("GET", "/api/guide-planning/source-catalog"),
+    ("POST", "/api/guide-planning/source-preview"),
+    ("POST", "/api/guide-planning/compose"),
     ("POST", "/api/guide-planning/prepare"),
     ("POST", "/api/guide-planning/plan"),
 )

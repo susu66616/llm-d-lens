@@ -39,6 +39,36 @@ async def test_get_adapter_preserves_command_result_and_field_selector(cluster_a
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["DeviceClass", "deviceclass", "deviceclasses", "DeviceClass.resource.k8s.io"])
+async def test_named_device_class_check_resolves_kind_and_cluster_scope(cluster_api, kind):
+    from llm_d_lens.infrastructure.kubernetes.commands import execute_sdk_command
+
+    responses = {
+        "/apis": {
+            "groups": [{"name": "resource.k8s.io", "preferredVersion": {"groupVersion": "resource.k8s.io/v1"}}]
+        },
+        "/apis/resource.k8s.io/v1": {
+            "resources": [
+                {"name": "deviceclasses", "singularName": "deviceclass", "kind": "DeviceClass", "namespaced": False}
+            ]
+        },
+        "/apis/resource.k8s.io/v1/deviceclasses/gpu.intel.com": {
+            "apiVersion": "resource.k8s.io/v1",
+            "kind": "DeviceClass",
+            "metadata": {"name": "gpu.intel.com"},
+        },
+    }
+    cluster_api.response = lambda request: responses[request.path]
+    result = await execute_sdk_command(
+        ["kubectl", "get", kind, "gpu.intel.com", "-o", "name"], kubeconfig=str(cluster_api.config)
+    )
+    assert result.ok, result.stderr
+    assert result.stdout == "deviceclass/gpu.intel.com"
+    assert cluster_api.calls[-1][0] == "/apis/resource.k8s.io/v1/deviceclasses/gpu.intel.com"
+    assert cluster_api.methods == ["GET", "GET", "GET"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "args",
     [

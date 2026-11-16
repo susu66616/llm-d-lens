@@ -163,6 +163,9 @@ def render_configuration(request: RenderRequest) -> RenderResponse:
     guide_variant = getattr(candidate, "guide_variant", None)
     if isinstance(guide_variant, str) and guide_variant:
         content["guideVariant"] = guide_variant
+    composition = getattr(candidate, "guide_composition", None)
+    if composition is not None:
+        content["guideComposition"] = composition
     guide_settings = getattr(candidate, "guide_settings", None)
     if guide_settings is not None:
         content["guideSettings"] = guide_settings

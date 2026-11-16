@@ -13,6 +13,362 @@ are no longer supported.
 
 ## Python domain contracts
 
+### Shared Manual / Agentic planning
+
+The new creation UI uses the existing Agentic run lifecycle for both decision
+modes. Legacy requests without `requirements` keep their existing behavior.
+
+<Tabs>
+<TabItem value="rest-api" label="REST API">
+
+**`POST /api/agentic-deployments`** returns `201` with an
+`AgenticDeploymentRun`. The browser's `/stream` variant returns progress and
+the same completed run over SSE. Neither operation deploys resources.
+
+In addition to the Standard serving and active-session fields:
+
+- `planning_mode`: `manual` or `agentic` (default). Manual never initializes an external AI planner.
+- `requirements`: model and cluster identity, objective, `hard_constraints.maxAccelerators`,
+  workload, performance targets, required/forbidden mechanism IDs and unknown fields.
+  Legacy mechanism IDs `pd_disaggregation`, `prefix_routing`,
+  `external_kv_cache`, `prefix_cache` and `chunked_prefill` remain supported.
+  Source composition also accepts catalog mechanisms such as `index` (precise
+  routing), `load-routing`, `wide-ep` and `speculation`; these must be established
+  by the final resources, not merely requested. `affinity` and `index` are distinct.
+  Objective defaults to `balanced`; latency, throughput, cost and reliability
+  remain supported. Missing workload fields stay unknown.
+- `requirements.hard_constraints.providerRef`: optional explicit provider recipe.
+  Supported recipes are `optimized-baseline`, `pd-disaggregation`,
+  `precise-prefix-cache-routing` and `tiered-prefix-cache`. Other recipes are
+  rejected; mismatching candidates are excluded at planning, revision and approval.
+- `requirements.workload.p95InputTokens`: optional positive input-length percentile,
+  independent of mean `inputTokens`; omission stays unknown.
+- `requirements.performance_targets.e2eMs`: optional positive integer end-to-end
+  P95 latency target in milliseconds, alongside `ttftMs` and `tpotMs`. Trial ranking
+  requires every completed repetition to satisfy configured targets.
+- `planner_prompt`: optional AI goal. With an explicit `ai_provider_id`, missing
+  `prefixReuse` and `prefillHeavy` traits can be extracted from explicit statements
+  in any language. Structured values take precedence. Added traits set
+  `workload.interpretationSource=ai_goal`; interpretation failure returns `422`.
+  Numeric limits are not inferred. Manual does not call an external AI provider.
+- `planning_facts.max_candidates`: Agentic retained-candidate limit, 1–10.
+  Manual preserves each distinct supported capability family even for a smaller limit.
+  Live free resources override client-supplied hardware facts.
+- `execution_policy.max_total_duration_minutes`: planning deadline, 1–180.
+- `execution_policy.allow_trials`: defaults to false. Enabling it permits a later,
+  separately approved `/optimize` request; it never starts testing during planning.
+
+```json
+{
+  "model": "Qwen/Qwen3-8B",
+  "deployment_name": "reviewed-model",
+  "cluster_session_id": "00000000-0000-0000-0000-000000000001",
+  "storage_type": "model-cache",
+  "storage_volume_id": "registered-cache-id",
+  "replicas": 1,
+  "tensor_parallel_size": 1,
+  "planning_mode": "manual",
+  "planning_facts": {
+    "model_weight_gib": 16,
+    "vram_per_gpu_gib": 1,
+    "free_gpu_count": 0,
+    "max_candidates": 3
+  },
+  "requirements": {
+    "model": "Qwen/Qwen3-8B",
+    "cluster_id": "registered-cluster-id",
+    "objective": "throughput",
+    "hard_constraints": {"maxAccelerators": 4},
+    "workload": {"prefixReuse": null, "prefillHeavy": null},
+    "performance_targets": {"ttftMs": null, "tpotMs": null},
+    "required_features": [],
+    "forbidden_features": ["external_kv_cache"]
+  },
+  "execution_policy": {"mode": "approval_required", "allow_trials": false}
+}
+```
+
+Replace the example IDs with an active session, its actual cluster and a ready
+model cache. Invalid identities, unsupported constraints, unknown required
+mechanisms and infeasible resource limits return `422`.
+
+The response includes `configuration_plan`, `revision` and optional `parent_run_id`.
+The shared plan retains requirements, mechanism decisions, resource estimates,
+the exact deployable `configuration`, and separate completed/pending checks.
+`planning_checked` does not mean manifests, admission or performance passed.
+
+For both modes with structured requirements, planning also expands native CPU
+KV-cache adapters for baseline, precise routing and P/D. Standalone tiered cache
+is sized through `guideSettings.cacheCpuGiB`; compositions use
+`guideComposition.nativeCpuCacheGiB`. Each serving replica receives at most
+8 GiB; total cache allocation is at most 25% of observed free host memory.
+Unknown memory does not authorize an automatic cache allocation.
+`resource_estimate.cpu_cache_gib` records the total. Planned cache decisions stay
+`unknown` until source-bound rendering succeeds. Sequence count is clamped to
+the selected model/VRAM concurrency estimate when available in Manual.
+
+Unknown workload shape or prefix reuse never rejects a technically compatible
+candidate. `prefix_routing` is an independent nullable Boolean on candidates:
+`true` composes source-established affinity plugins into the default/prefill
+scheduling profile, `false` removes affinity while retaining load routing,
+and `null` preserves legacy provider routing. Generated configuration carries
+`prefixRouting`; the same option is consumed by the shared Guide renderer.
+The saved bundle retains `router-prefix-source.yaml` and validates effective
+values against that source, preserving P/D handlers and decode profiles.
+
+Manual excludes known target misses, then ranks mechanism coverage and the objective:
+throughput prefers P/D then prefix routing; latency prefers prefix routing;
+cost prefers fewer accelerators; reliability prefers multiple serving replicas.
+The default `balanced` objective and remaining ties prefer fewer accelerators. Retained alternatives favor recipe/cache
+diversity, including independent routing choices. Rationale exposes this policy, not a measured optimum. Cache and routing compositions
+do not inherit performance evidence from their uncomposed topology.
+
+#### Full Guide source composition
+
+The integrated editor uses the selected cluster's pinned sources rather than
+five hardcoded optimization controls:
+
+- **`GET /api/guide-planning/source-catalog?clusterId=...`** returns `commit`,
+  `guides`, selectable `assets`, source parameters and `optimizations.items`.
+  The catalog contains the shared mechanism definitions and additional discovered
+  Guides. Presence does not establish compatibility or an executable adapter.
+  `environment` preserves literal exports and literal `${VAR:-default}` values
+  from `guides/env.sh`, including chart version pins. Shell commands and dynamic
+  expressions are not evaluated.
+- **`POST /api/guide-planning/source-preview`** takes `clusterId`, `commit` and
+  `unit` (including its catalog `path` and optional typed edits). It renders a
+  component and returns its documents and observed optimization flags.
+- **`POST /api/guide-planning/compose`** takes the pinned `commit`, `clusterId`,
+  `clusterSessionId`, `namespace`, `modelCacheEntryId`, `units` (1–60), optional
+  `router`, `guideSelection`, `deploymentIntent` and `finalConfiguration`.
+  `finalConfiguration` binds edited YAML to the previous `baseChecksum`.
+  It returns `files` (`deployment.yaml`, `provenance.json`), effective
+  `optimizations`, `compositionChecksum`, and separate resource/admission validation.
+  DRA sizing supports generated `ResourceClaimTemplate` resources with `ExactCount`
+  requests. Counts follow each role's tensor parallelism, replicas and autoscaler
+  ceiling; non-accelerator requests remain unchanged. Availability uses the matching
+  cluster profile's usable-device inventory. External claims, ambiguous allocations
+  and mixed-profile availability are rejected; device selectors, NICs and placement
+  still require admission and runtime validation.
+  Optional `validateCluster` runs a server admission dry-run, not deployment.
+- **`POST /api/agentic-deployments/{run_id}/composition`** persists that result
+  into an idle deployment plan. Submit the current `revision`, `compare`, and
+  `candidates`, each containing `candidate_id`, restorable `draft` and composer
+  inputs in `composition`. A proposal may instead carry an explicit `error`.
+  `compare=true` must account for every retained candidate. Manual selects maximum
+  final-manifest coverage among passing proposals; Agentic retains its selected
+  recommendation when valid, or explicitly reports a validated fallback.
+
+Successful plan composition increments `revision`, invalidates old approval and
+performance evidence, and stores `source_bundle`, `source_draft`, `source_request`,
+`source_candidates`, and selectable Service `endpoints` in `configuration_plan`.
+`configuration.checksum` is the review token for the generated deployment YAML.
+Decisions carry `catalog_id` as well as legacy-compatible `capability_id`.
+
+All source operations require `guide:plan:execute` and authorized cluster access;
+plan composition also requires `deployment:agentic:create`. Model-cache and
+storage reads keep their existing permission checks. No Guide shell script runs.
+Stale source/editor revisions return `409`; invalid composer inputs return `400`;
+failed plan comparisons return `409` without replacing the previous plan.
+Rendering deadlines return `504` for plan composition.
+
+Approval additionally requires `endpoint`, an exact value from the reviewed
+`configuration_plan.endpoints`:
+
+```json
+{
+  "configuration_checksum": "sha256:reviewed-deployment-yaml-checksum",
+  "endpoint": "reviewed-inference-service:8000"
+}
+```
+
+Approval rechecks the cache binding, available devices, memory and required/forbidden
+mechanisms, then uses the existing managed deployment lifecycle. Source snapshots
+use `runtime.modelSource=cached-readonly`; ordinary `auto-cache` contracts remain
+unchanged. Multi-node model roles and cluster-scoped provisioning without a managed
+lifecycle remain blocked, with explicit errors rather than partial deployment.
+The bounded exception is Router authentication RBAC: ClusterRoles may only create
+TokenReviews and SubjectAccessReviews, with bindings to the generated EPP
+ServiceAccount. Runtime names are deployment-specific; creation binds ownership to
+the namespace UID and never overwrites foreign or changed objects. Namespace cleanup
+garbage-collects these exact resources and waits for their removal; incomplete
+collection is reported as cleanup failure. Other cluster-wide grants remain blocked.
+Stopping a source deployment removes its HPA/KEDA autoscalers before scaling model
+controllers to zero; deploying the reviewed snapshot again recreates those autoscalers.
+Source-backed `/optimize` requests also supply `endpoints` keyed by candidate ID;
+trials use the reviewed source candidate resources, never a substitute base recipe.
+
+**Legacy `POST /api/agentic-deployments/{run_id}/select`** returns `200`:
+
+- `{"candidate_id":"..."}` selects an already validated alternative.
+  For source plans this restores that candidate's exact reviewed resources and editor
+  parameters, increments the revision, and resets the endpoint choice. Completed trial
+  results remain available. Unreviewed candidates and unfinished trials block selection.
+  Source plans must use `/composition` for parameter edits and rendering; legacy edit
+  fields cannot replace an already reviewed source snapshot.
+- `{"candidate_id":"...","role":"decode","replicas":2}` creates a new, live-validated
+  user revision. `role` is `decode` or `prefill`. Optional `tensor_parallel_size`
+  and `replicas` are 1–128. Optional runtime edits are `max_model_len`
+  (256–1048576), `gpu_memory_utilization` (0.5–0.98), `max_num_seqs` (1–4096)
+  and `max_num_batched_tokens` (256–131072). Runtime edits affect all serving roles.
+- `{"candidate_id":"...","native_cpu_cache_gib":4}` edits an already selected
+  CPU KV cache, in GiB per model replica (greater than zero, at most 1024).
+  The total must fit 25% of currently discovered free host memory.
+- `{"candidate_id":"...","render_resources":true}` generates source-pinned YAML
+  using the same renderer as Configuration and validates manifest consistency.
+  It reads cluster/storage state and may fetch official sources, but does not
+  install anything. Do not combine rendering with edits.
+
+Edits preserve the original run, set `parent_run_id`, increment `revision`, and
+invalidate old resource checks and performance evidence. Failed edits return
+`409`. Rendering errors retain their status; a concurrently changed selection
+is rejected. Successful rendering sets `validation.status=resources_checked`;
+the manifest is in `configuration_plan.configuration.content.officialGuide.renderedManifest`.
+The legacy renderer remains compatible with the original five mechanism IDs;
+broader catalog constraints require `/composition`. Manual retains
+distinct supported recipe/cache families and invokes
+`{"candidate_id":"...","render_resources":true,"compare_combinations":true}`.
+This Manual-only option checks retained recipes against pinned source without
+publishing intermediate selections. It reports rejected candidates and selects
+the greatest actual enabled capability coverage after source validation, breaking ties
+by planning order. `validation.coverage` reports `enabled`,
+`available_in_other_combinations` and whether coverage is `complete`.
+Missing adapters are `unsupported`, not `conflict`; Agentic omissions can be `alternative`.
+If none pass, `409` preserves the original
+recommendation and blocks approval. Permission and unexpected server errors
+propagate rather than being treated as recipe incompatibility.
+Without `compare_combinations`, rendering preserves the explicit candidate choice.
+Effective source-enabled prefix caching
+and chunked prefill are recorded as enabled even when inherited from a Guide.
+Manual enables supported runtime flags even when their workload benefit is unknown.
+For direct vLLM sources that omit those flags, configuration includes a mandatory
+startup CLI capability probe using the selected runtime image; a failed probe blocks
+model startup. This does not certify runtime readiness or measured performance.
+Required runtime flags and explicit exclusions must be verified before publishing
+the checked configuration. Disabling engine prefix caching excludes dependent routing/offload candidates.
+Prefix caching required by a sized CPU-cache recipe is recorded as `dependency`.
+Topology revisions preserve the allocation per replica; explicit cache edits revise
+it. Both recheck the 25% host-memory
+budget; approval refreshes this budget again.
+Admission, readiness and workload performance remain pending.
+
+**`POST /api/agentic-deployments/{run_id}/approve`** returns `202`. New shared
+plans must have reviewed/generated resources; otherwise it returns `409`.
+Send `{"configuration_checksum":"<reviewed configuration checksum>"}`; a missing
+or stale checksum also returns `409`. Concurrent approval or candidate mutation
+is rejected while approval is in progress.
+Capacity is refreshed before submitting the stored configuration to Deploy.
+The response contains `deployment_run_id`. Generation is not a guarantee of
+admission or readiness. Legacy approval remains compatible.
+
+Shared plans reject the legacy `/refine` prompt-only operation with `409`:
+create another plan with changed structured requirements instead.
+Completed new runs/revisions are recoverable from snapshots through the existing
+`GET /api/agentic-deployments/{run_id}` endpoint.
+
+**`POST /api/v1/configurations/plan`** remains an intent-inspection compatibility
+endpoint. It performs no cluster reads and returns no executable candidates,
+no topology and no enabled mechanisms. Workload applicability remains unknown
+until real planning; it no longer invents candidate rankings.
+
+</TabItem>
+<TabItem value="python-api" label="Python API">
+
+Source rendering is shared by both planning modes. `authorized_inventory(request,
+selection)` returns the authorized source root and catalog; `render_unit(root,
+catalog, unit)` previews a source component. `compose(request, body)` validates
+and returns a bundle without persisting a deployment. `render_source_plan(service,
+run_id, payload, request)` validates and persists the reviewed plan revision.
+Pass an authenticated request context, never an invented principal.
+
+```python
+from llm_d_lens.agentic.service import service
+from llm_d_lens.agentic.source_plan import SourcePlanRequest, render_source_plan
+from llm_d_lens.deploy.source_catalog import authorized_inventory
+from llm_d_lens.deploy.source_composition import render_unit, compose
+
+async def preview_component(http_request, cluster_id: str, unit: dict):
+    root, catalog = await authorized_inventory(http_request, {"clusterId": cluster_id})
+    return await render_unit(root, catalog, unit)
+
+async def review_composition(http_request, run_id: str, proposals: list[dict]):
+    run = service.get(run_id)
+    if run is None:
+        raise KeyError("Deployment plan not found")
+    return await render_source_plan(
+        service, run_id,
+        SourcePlanRequest(revision=run.revision, compare=True, candidates=proposals),
+        http_request,
+    )
+
+async def preview_bundle(http_request, composition_inputs: dict):
+    return await compose(http_request, composition_inputs)
+```
+
+Source approval uses `service.approve(run_id, owner_user_id=..., http_request=...,
+source_endpoint=...)` after the HTTP endpoint has verified the review checksum.
+`SourceCompositionAdapter` in `deploy.providers.configuration_manifest` reuses
+the existing namespace-isolated deployment, cache preflight, readiness and cleanup.
+
+`OpenAICompatiblePlanner.interpret_workload(goal)` returns only `prefixReuse` and
+`prefillHeavy` as booleans or null. It raises `OpenAIPlannerError` on an invalid
+response or provider failure. Shared `create` fills only previously unknown traits;
+it does not replace explicit requirements or infer resource quantities.
+
+```python
+from llm_d_lens.agentic.planner import OpenAICompatiblePlanner
+
+async def interpret_goal(provider_id: str):
+    planner = OpenAICompatiblePlanner.from_provider_id(provider_id)
+    if planner is None:
+        raise ValueError("Select a configured AI provider")
+    return await planner.interpret_workload("Requests repeat the same long document with short answers.")
+```
+
+`DeploymentRequirements` accepts the same optional `providerRef`, `p95InputTokens`
+and `e2eMs` dictionary fields described in the REST contract. `create` preserves the
+independent percentile, normalizes the end-to-end target into planning facts and
+filters candidates by the explicitly selected provider before ranking.
+
+`AgenticDeploymentService.create` owns shared decision planning;
+`revise_candidate` revalidates edits and preserves the original.
+`planning_resource_request` maps the selected configuration to
+`llm_d_lens.deploy.guide_planning.plan_resources(request, body)`, the existing
+authenticated rendering contract. `accept_rendered_plan` validates and records
+its successful result. `approve` delegates to Deploy; HTTP callers must use the
+approval endpoint to enforce the resource-review gate.
+
+```python
+from llm_d_lens.agentic.models import (
+    AgenticCandidateSelectionRequest,
+    AgenticDeploymentCreateRequest,
+)
+from llm_d_lens.agentic.service import service
+
+async def create_and_revise(payload: dict):
+    # payload contains an active session and ready cache, as in the REST example.
+    request = AgenticDeploymentCreateRequest.model_validate(payload)
+    original = await service.create(request)
+    revised = await service.revise_candidate(
+        original.id,
+        AgenticCandidateSelectionRequest(
+            candidate_id=original.selected_candidate.id,
+            role="decode",
+            replicas=2,
+        ),
+    )
+    assert revised.parent_run_id == original.id
+    assert revised.configuration_plan.validation["status"] == "planning_checked"
+    return revised
+```
+
+The pure compatibility helper is
+`llm_d_lens.configuration.decision_engine.build_plan(PlanRequest(...))`;
+it only inspects intent, never creates an executable deployment.
+
+</TabItem>
+</Tabs>
+
 The models in `llm_d_lens.deploy.contracts` and the
 `llm_d_lens.deploy.service.DeploymentService` protocol define the internal
 Configuration-to-Deploy boundary. They are not additional HTTP endpoints.
@@ -2628,3 +2984,28 @@ bindings belonging to another model. Generic binding creation rejects retired
 `deployment_run` and `deployment_execution` resource types.
   </TabItem>
 </Tabs>
+
+## Measured Agentic optimization
+
+`POST /api/agentic-deployments/{run_id}/optimize` returns HTTP 202 and the updated
+plan. It requires Agentic approval and benchmark creation permissions, cluster
+access and an active session. `POST /api/agentic-deployments/{run_id}/optimize/cancel`
+stops the task and cleans up its test deployments. Read progress through the
+existing `GET /api/agentic-deployments/{run_id}` response's `optimization` field.
+
+```json
+{"candidate_ids":["candidate-a","candidate-b"],"objective":"throughput","max_gpu_count":8,"max_duration_minutes":60,"max_benchmark_runs":4,"repetitions":2,"max_error_rate":0,"benchmark":{"matrix":[{"isl":512,"osl":128}],"concurrency_stages":[{"concurrency":4,"num_requests":100}]}}
+```
+
+The Python request type is `llm_d_lens.agentic.optimization.OptimizationRequest`.
+Objectives are `throughput`, `latency` and `throughput_per_gpu`. Optional
+`native_cpu_cache_gib` adds composition variants; its repetitions also count
+against `max_benchmark_runs`. Budgets are 1–1024 GPUs, 1–180 minutes, 1–30 runs
+and 1–3 repetitions. Invalid or insufficient budgets return 422 before starting.
+The response records `samples`, `ranking`, `best_candidate_id`, status and scope.
+Only completed comparable samples satisfying configured SLOs and the error cap
+are ranked. Cleanup failures remain visible and block approval.
+
+For interrupted cleanup, the cancel endpoint accepts the optional `cluster_session_id` query parameter. It must resolve to the original test cluster; a different cluster is rejected with HTTP 409.
+
+`guideComposition.nativeCpuCacheGiB` also supports `pd-disaggregation` with built-in NixlConnector/kv_both on both roles. The adapter emits ordered MultiConnector children and an image-matched capability init container; saved manifests must retain both. `native_cpu_cache_gib` in measured optimization adds P/D variants as well. Missing adapters, mismatched images, missing roles, and modified cache budgets fail validation. Capability checks do not replace workload correctness tests or benchmarks.

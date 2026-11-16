@@ -52,7 +52,7 @@ class BenchmarkPerformanceEvidence:
                     decode_replicas=candidate.replicas,
                     prefill_tp=candidate.prefill_tensor_parallel_size,
                     prefill_replicas=candidate.prefill_replicas,
-                    optimizations=(candidate.guide_variant or "",),
+                    optimizations=(candidate.guide_variant or "",) + ((f"native-cpu-cache:{candidate.native_cpu_cache_gib:g}GiB",) if candidate.native_cpu_cache_gib else ()),
                 ),
             )
             candidate_records = (
@@ -139,7 +139,7 @@ class BenchmarkPerformanceEvidence:
                     decode_replicas=candidate.replicas,
                     prefill_tp=candidate.prefill_tensor_parallel_size,
                     prefill_replicas=candidate.prefill_replicas,
-                    optimizations=(candidate.guide_variant or "",),
+                    optimizations=(candidate.guide_variant or "",) + ((f"native-cpu-cache:{candidate.native_cpu_cache_gib:g}GiB",) if candidate.native_cpu_cache_gib else ()),
                 ),
             )
             candidate_records = (

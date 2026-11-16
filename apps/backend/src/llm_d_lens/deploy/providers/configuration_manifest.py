@@ -470,7 +470,7 @@ class ConfigurationManifestAdapter:
 
     def __init__(
         self,
-        delegate: GuideAdapter,
+        delegate: GuideAdapter | None,
         command_runner,
         namespace_prefix: str,
         readiness_timeout_seconds: int,
@@ -577,6 +577,42 @@ class ConfigurationManifestAdapter:
                 manifest_ref=str(isolated),
                 artifact_hash=stable_hash({"provider_artifact": artifact.artifact_hash, "overlay": str(isolated)}),
             )
+        composition = overrides.get("guideComposition")
+        if composition and not self._is_exact(overrides):
+            import yaml
+            from llm_d_lens.configuration.guide_composition import compose_native_cpu_cache
+            from llm_d_lens.deploy.guide_planning import GuideError, select_manifest_paths
+
+            if not isinstance(composition, dict) or set(composition) != {"nativeCpuCacheGiB"}:
+                raise ValueError("Unknown Guide composition")
+            policy = getattr(self._delegate, "_policy", None)
+            root = getattr(self._delegate, "_guide_root", None) or getattr(policy, "guide_root", None)
+            if root is None:
+                raise ValueError("This provider cannot resolve a source-bound composition")
+            root = Path(root)
+            accelerator = overrides.get("hardware_profile") or getattr(self._delegate, "_accelerator", None) or getattr(policy, "accelerator", None)
+            paths = [str(path.relative_to(root)) for path in (root / "guides/tiered-prefix-cache").rglob("*") if path.is_file()]
+            try:
+                selected = select_manifest_paths(paths, "tiered-prefix-cache", accelerator, "vllm", "native/cpu")
+            except GuideError:
+                selected = select_manifest_paths(paths, "tiered-prefix-cache", accelerator, "vllm", "native/cpu/base")
+            status, donor, stderr = await self._runner(["kubectl", "kustomize", str(root / selected["guidePath"])])
+            if status or not donor.strip():
+                raise ValueError("Unable to render the native CPU cache source for composition")
+            reference = Path(artifact.manifest_ref or "")
+            path = reference / "manifest.yaml" if reference.is_dir() else reference
+            documents = compose_native_cpu_cache(list(yaml.safe_load_all(path.read_text())), list(yaml.safe_load_all(donor)), guide=definition.guide_id, capacity_gib=composition["nativeCpuCacheGiB"])
+            rendered = yaml.safe_dump_all(documents, sort_keys=False)
+            checksum = text_checksum(rendered)
+            if reference.is_dir():
+                path.write_text(rendered)
+            else:
+                directory = self._output_root / checksum.removeprefix("sha256:")
+                directory.mkdir(parents=True, exist_ok=True)
+                path = directory / "manifest.yaml"
+                path.write_text(rendered)
+                register_artifacts(directory, owner_type="deployment-manifest", owner_id=checksum.removeprefix("sha256:"), retention_class="configuration")
+            artifact = replace(artifact, manifest_ref=str(reference if reference.is_dir() else path), manifest_checksum=checksum, artifact_hash=stable_hash({"provider": artifact.artifact_hash, "composition": composition, "manifest": checksum}))
         artifact = prepare_graceful_shutdown(artifact, self._output_root)
         artifact = prepare_single_slice_disaggregated_set(artifact, self._output_root)
         artifact = prepare_shared_memory(artifact, self._output_root, exact=self._is_exact(overrides))
@@ -934,3 +970,415 @@ class ConfigurationManifestAdapter:
             or not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", namespace)
         ):
             raise ValueError("deployment namespace is outside the configured allowlist")
+
+
+class SourceCompositionAdapter(ConfigurationManifestAdapter):
+    """Deploy the reviewed source snapshot without a second Guide router installation."""
+
+    managed_resource_kinds = frozenset(
+        {
+            "Deployment",
+            "LeaderWorkerSet",
+            "DisaggregatedSet",
+            "Service",
+            "ConfigMap",
+            "Secret",
+            "ServiceAccount",
+            "Role",
+            "RoleBinding",
+            "ClusterRole",
+            "ClusterRoleBinding",
+            "ResourceClaimTemplate",
+            "ResourceClaim",
+            "InferencePool",
+            "HTTPRoute",
+            "Gateway",
+            "PodMonitor",
+            "ServiceMonitor",
+            "HorizontalPodAutoscaler",
+            "ScaledObject",
+            "TriggerAuthentication",
+            "NetworkPolicy",
+            "PodDisruptionBudget",
+        }
+    )
+
+    def __init__(self, command_runner, namespace_prefix, readiness_timeout_seconds, **kwargs):
+        super().__init__(None, command_runner, namespace_prefix, readiness_timeout_seconds, **kwargs)
+
+    def discover(self):
+        return GuideDefinition("source-composition", "generated", "source-composition.v1", "experimental")
+
+    @staticmethod
+    def router_rbac(documents, namespace=None, *, standalone=False):
+        if any(not isinstance(doc, dict) for doc in documents):
+            raise ValueError("Router RBAC resources must be mappings.")
+        resources = [doc for doc in documents if doc.get("kind") in {"ClusterRole", "ClusterRoleBinding"}]
+        if not resources:
+            return []
+        if any(
+            not isinstance(doc.get("metadata"), dict) or not isinstance(doc["metadata"].get("name"), str)
+            for doc in resources
+        ):
+            raise ValueError("Router RBAC resources require explicit names.")
+        roles = {doc["metadata"]["name"] for doc in resources if doc["kind"] == "ClusterRole"}
+        accounts = {
+            doc["metadata"]["name"]: doc["metadata"].get("namespace")
+            for doc in documents
+            if doc.get("kind") == "ServiceAccount"
+        }
+        router_accounts = {
+            pod.get("serviceAccountName")
+            for doc in documents
+            for pod in _pod_specs(doc)
+            if any(container.get("name") == "epp" for container in pod.get("containers", []))
+        }
+        allowed = {
+            ("authentication.k8s.io", "tokenreviews"),
+            ("authorization.k8s.io", "subjectaccessreviews"),
+        }
+        for doc in resources:
+            if doc.get("apiVersion") != "rbac.authorization.k8s.io/v1":
+                raise ValueError("Router RBAC requires rbac.authorization.k8s.io/v1.")
+            if namespace and not re.fullmatch(
+                re.escape(namespace) + r"-router-auth-[a-f0-9]{12}", doc["metadata"]["name"]
+            ):
+                raise ValueError("Router RBAC identity must belong to this deployment namespace.")
+            if not standalone and doc["metadata"].get("ownerReferences"):
+                raise ValueError("Router RBAC ownership is assigned from the deployment namespace, not source input.")
+            if doc["kind"] == "ClusterRole":
+                rules = doc.get("rules") or []
+                if (
+                    doc.get("aggregationRule")
+                    or not isinstance(rules, list)
+                    or not rules
+                    or any(
+                        not isinstance(rule, dict)
+                        or set(rule) != {"apiGroups", "resources", "verbs"}
+                        or rule["verbs"] != ["create"]
+                        or not isinstance(rule["apiGroups"], list)
+                        or not isinstance(rule["resources"], list)
+                        or len(rule["apiGroups"]) != 1
+                        or len(rule["resources"]) != 1
+                        or not isinstance(rule["apiGroups"][0], str)
+                        or not isinstance(rule["resources"][0], str)
+                        or (rule["apiGroups"][0], rule["resources"][0]) not in allowed
+                        for rule in rules
+                    )
+                ):
+                    raise ValueError("Router ClusterRole may only create TokenReviews and SubjectAccessReviews.")
+            else:
+                ref = doc.get("roleRef") or {}
+                subjects = doc.get("subjects") or []
+                if (
+                    not isinstance(ref, dict)
+                    or not isinstance(subjects, list)
+                    or ref.get("apiGroup") != "rbac.authorization.k8s.io"
+                    or ref.get("kind") != "ClusterRole"
+                    or not isinstance(ref.get("name"), str)
+                    or (not standalone and ref.get("name") not in roles)
+                    or (
+                        namespace and not re.fullmatch(re.escape(namespace) + r"-router-auth-[a-f0-9]{12}", ref["name"])
+                    )
+                    or len(subjects) != 1
+                    or not isinstance(subjects[0], dict)
+                    or subjects[0].get("kind") != "ServiceAccount"
+                    or subjects[0].get("apiGroup", "") != ""
+                    or not isinstance(subjects[0].get("name"), str)
+                    or (not standalone and subjects[0].get("name") not in accounts)
+                    or (not standalone and subjects[0].get("name") not in router_accounts)
+                    or (
+                        not standalone
+                        and accounts.get(subjects[0].get("name"))
+                        and subjects[0].get("namespace") != accounts[subjects[0]["name"]]
+                    )
+                    or (namespace and subjects[0].get("namespace") != namespace)
+                ):
+                    raise ValueError("Router binding must target its reviewed role and deployment ServiceAccount.")
+        return resources
+
+    def validate_inputs(self, definition, cluster_snapshot, overrides):
+        if not self._is_exact(overrides):
+            return ValidationResult(False, ["Source composition requires a rendered manifest."])
+        result = super().validate_inputs(definition, cluster_snapshot, overrides)
+        if not result.accepted:
+            return result
+        official = overrides["officialGuide"]
+        if official.get("deploymentBundle"):
+            return ValidationResult(False, ["Source composition requires rendered router resources, not Helm inputs."])
+        documents = list(yaml.safe_load_all(official["renderedManifest"]))
+        try:
+            self.router_rbac(documents)
+        except ValueError as error:
+            return ValidationResult(False, [str(error)])
+        unsupported = sorted(
+            {
+                str(doc.get("kind"))
+                for doc in documents
+                if isinstance(doc, dict) and doc.get("kind") not in self.managed_resource_kinds
+            }
+        )
+        if unsupported:
+            return ValidationResult(
+                False, ["Managed composition lifecycle does not support: " + ", ".join(unsupported)]
+            )
+        runtime = overrides.get("runtime") or {}
+        if runtime.get("modelSource") != "cached-readonly":
+            return ValidationResult(False, ["Source compositions require a read-only model cache."])
+        try:
+            from llm_d_lens.configuration.manifest_facts import validate_manifest_facts
+
+            validate_manifest_facts(overrides, official["renderedManifest"])
+        except ValueError as error:
+            return ValidationResult(False, [str(error)])
+        return result
+
+    async def render(self, definition, overrides):
+        validation = self.validate_inputs(definition, {}, overrides)
+        if not validation.accepted:
+            raise ValueError(" ".join(validation.reasons))
+        artifact = await super().render(definition, overrides)
+        documents = list(yaml.safe_load_all(Path(artifact.manifest_ref).read_text(encoding="utf-8")))
+        rbac = self.router_rbac(documents)
+        if rbac:
+            namespace = str(overrides.get("_deployment_namespace") or "")
+            self._validate_namespace(namespace)
+            roles = {}
+            for doc in rbac:
+                original = doc["metadata"]["name"]
+                suffix = stable_hash({"kind": doc["kind"], "name": original}).removeprefix("sha256:")[:12]
+                doc["metadata"]["name"] = f"{namespace}-router-auth-{suffix}"
+                doc["metadata"].pop("namespace", None)
+                doc["metadata"].pop("ownerReferences", None)
+                if doc["kind"] == "ClusterRole":
+                    roles[original] = doc["metadata"]["name"]
+            for doc in rbac:
+                if doc["kind"] == "ClusterRoleBinding":
+                    doc["roleRef"]["name"] = roles[doc["roleRef"]["name"]]
+                    doc["subjects"][0]["namespace"] = namespace
+            self.router_rbac(documents, namespace)
+            path = Path(artifact.manifest_ref).with_name("source-router-scoped.yaml")
+            content = yaml.safe_dump_all(documents, sort_keys=False)
+            path.write_text(content, encoding="utf-8")
+            artifact = replace(
+                artifact,
+                manifest_ref=str(path),
+                manifest_checksum=text_checksum(content),
+                artifact_hash=stable_hash({"source": artifact.artifact_hash, "routerNamespace": namespace}),
+                deployment_contract={
+                    **artifact.deployment_contract,
+                    "routerRbac": [{"kind": doc["kind"], "name": doc["metadata"]["name"]} for doc in rbac],
+                },
+            )
+            register_artifacts(
+                path.parent,
+                owner_type="deployment-manifest",
+                owner_id=artifact.manifest_checksum.removeprefix("sha256:"),
+                source_version=artifact.source_ref,
+                retention_class="configuration",
+            )
+        labels = (overrides.get("runtime") or {}).get("namespaceLabels") or {}
+        if not isinstance(labels, dict) or any(
+            not isinstance(k, str) or not isinstance(v, str) for k, v in labels.items()
+        ):
+            raise ValueError("Namespace labels must be string pairs.")
+        return replace(
+            artifact,
+            artifact_hash=stable_hash({"manifest": artifact.artifact_hash, "namespaceLabels": labels}),
+            deployment_contract={**artifact.deployment_contract, "namespaceLabels": labels},
+        )
+
+    async def deploy(self, artifact, execution_context):
+        namespace = self._namespace(execution_context)
+        documents = list(yaml.safe_load_all(Path(artifact.manifest_ref).read_text(encoding="utf-8")))
+        rbac = self.router_rbac(documents, namespace)
+        if rbac:
+            status, stdout, stderr = await self._runner(["kubectl", "create", "namespace", namespace])
+            if status and "alreadyexists" not in (stdout + stderr).lower():
+                raise RuntimeError(stderr or stdout or "Namespace creation failed")
+            status, stdout, stderr = await self._runner(
+                ["kubectl", "get", "namespace", namespace, "--namespace", namespace, "-o", "json"]
+            )
+            if status:
+                raise RuntimeError(stderr or stdout or "Cannot establish the Router RBAC namespace owner")
+            uid = json.loads(stdout).get("metadata", {}).get("uid")
+            if not isinstance(uid, str) or not uid:
+                raise ValueError("Namespace UID is required for Router RBAC ownership.")
+            owner = {"apiVersion": "v1", "kind": "Namespace", "name": namespace, "uid": uid}
+            for doc in rbac:
+                resource = f"{doc['kind'].lower()}/{doc['metadata']['name']}"
+                status, stdout, stderr = await self._runner(
+                    ["kubectl", "get", resource, "--namespace", namespace, "--ignore-not-found=true", "-o", "json"]
+                )
+                if status:
+                    raise RuntimeError(stderr or stdout or f"Could not inspect {resource}")
+                if stdout.strip():
+                    existing = json.loads(stdout)
+                    try:
+                        self.router_rbac([existing], namespace, standalone=True)
+                    except ValueError as error:
+                        raise ValueError(f"Refusing to overwrite changed Router RBAC: {resource}") from error
+                    fields = ("rules",) if doc["kind"] == "ClusterRole" else ("roleRef",)
+                    owners = existing.get("metadata", {}).get("ownerReferences") or []
+                    subjects_match = doc["kind"] != "ClusterRoleBinding" or [
+                        {**subject, "apiGroup": subject.get("apiGroup", "")} for subject in existing.get("subjects", [])
+                    ] == [{**subject, "apiGroup": subject.get("apiGroup", "")} for subject in doc["subjects"]]
+                    if (
+                        len(owners) != 1
+                        or any(owners[0].get(key) != value for key, value in owner.items())
+                        or not subjects_match
+                        or any(existing.get(key) != doc.get(key) for key in fields)
+                    ):
+                        raise ValueError(f"Refusing to overwrite unowned or changed Router RBAC: {resource}")
+                    continue
+                doc["metadata"]["ownerReferences"] = [owner]
+                path = Path(artifact.manifest_ref).with_name(f"{doc['kind'].lower()}-{doc['metadata']['name']}.yaml")
+                path.write_text(yaml.safe_dump(doc), encoding="utf-8")
+                register_artifacts(
+                    path.parent,
+                    owner_type="deployment-manifest",
+                    owner_id=artifact.manifest_checksum.removeprefix("sha256:"),
+                    source_version=artifact.source_ref,
+                    retention_class="configuration",
+                )
+                status, stdout, stderr = await self._runner(
+                    ["kubectl", "create", "--namespace", namespace, "--filename", str(path)]
+                )
+                if status:
+                    raise RuntimeError(stderr or stdout or f"Could not create {resource}")
+            path = Path(artifact.manifest_ref).with_name("source-namespaced.yaml")
+            content = yaml.safe_dump_all([doc for doc in documents if doc not in rbac], sort_keys=False)
+            path.write_text(content, encoding="utf-8")
+            artifact = replace(artifact, manifest_ref=str(path), manifest_checksum=text_checksum(content))
+            register_artifacts(
+                path.parent,
+                owner_type="deployment-manifest",
+                owner_id=artifact.manifest_checksum.removeprefix("sha256:"),
+                source_version=artifact.source_ref,
+                retention_class="configuration",
+            )
+        labels = artifact.deployment_contract.get("namespaceLabels")
+        if labels:
+            namespace = self._namespace(execution_context)
+            path = Path(artifact.manifest_ref).with_name(f"{namespace}-namespace.yaml")
+            path.write_text(
+                yaml.safe_dump(
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Namespace",
+                        "metadata": {"name": namespace, "labels": labels},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            register_artifacts(
+                path.parent,
+                owner_type="deployment-manifest",
+                owner_id=artifact.manifest_checksum.removeprefix("sha256:"),
+                source_version=artifact.source_ref,
+                retention_class="configuration",
+            )
+            status, stdout, stderr = await self._runner(
+                ["kubectl", "apply", "--namespace", namespace, "--filename", str(path)]
+            )
+            if status:
+                raise RuntimeError(stderr or stdout or "Namespace labels could not be applied")
+        return await super().deploy(artifact, execution_context)
+
+    async def cleanup(self, execution, artifact, *, force=False):
+        result = await super().cleanup(execution, artifact, force=force)
+        if not result["cleaned_up"]:
+            return result
+        namespace = self._namespace(execution)
+        for resource in artifact.deployment_contract.get("routerRbac", []):
+            name = f"{resource['kind'].lower()}/{resource['name']}"
+            status, stdout, stderr = await self._runner(
+                ["kubectl", "get", name, "--namespace", namespace, "--ignore-not-found=true", "-o", "json"]
+            )
+            if not status and stdout.strip():
+                status, stdout, stderr = await self._runner(
+                    [
+                        "kubectl",
+                        "wait",
+                        name,
+                        "--namespace",
+                        namespace,
+                        "--for=delete",
+                        f"--timeout={self._readiness_timeout_seconds}s",
+                    ]
+                )
+            if status and (
+                ("(NotFound)" in stderr and resource["name"] in stderr)
+                or stderr.strip() == "error: no matching resources found"
+            ):
+                status = 0
+            if status:
+                return {"cleaned_up": False, "error": stderr or stdout or f"Router RBAC cleanup pending: {name}"}
+        return result
+
+    @staticmethod
+    def _resources(artifact, kinds):
+        return [
+            doc
+            for doc in yaml.safe_load_all(Path(artifact.manifest_ref).read_text(encoding="utf-8"))
+            if isinstance(doc, dict) and doc.get("kind") in kinds
+        ]
+
+    async def readiness(self, execution):
+        result = await super().readiness(execution)
+        if not result.accepted:
+            return result
+        for doc in self._resources(execution["_artifact"], {"LeaderWorkerSet", "DisaggregatedSet"}):
+            resource = f"{doc['kind'].lower()}/{doc['metadata']['name']}"
+            status, stdout, stderr = await self._runner(
+                [
+                    "kubectl",
+                    "wait",
+                    resource,
+                    "--namespace",
+                    execution["namespace"],
+                    "--for=condition=Available",
+                    f"--timeout={self._readiness_timeout_seconds}s",
+                ]
+            )
+            if status:
+                return ValidationResult(False, [(stderr or stdout or f"{resource} not available").strip()])
+        return result
+
+    async def stop(self, execution, artifact):
+        namespace = self._namespace(execution)
+        # Remove reconcilers first; reapplying the reviewed snapshot restores them.
+        for doc in self._resources(artifact, {"ScaledObject", "HorizontalPodAutoscaler"}):
+            resource = f"{doc['kind'].lower()}/{doc['metadata']['name']}"
+            status, stdout, stderr = await self._runner(
+                ["kubectl", "delete", resource, "--namespace", namespace, "--ignore-not-found=true"]
+            )
+            if status:
+                return {"stopped": False, "error": stderr or stdout or f"Could not stop {resource}"}
+        result = await super().stop(execution, artifact)
+        for doc in self._resources(artifact, {"LeaderWorkerSet", "DisaggregatedSet"}):
+            resource = f"{doc['kind'].lower()}/{doc['metadata']['name']}"
+            command = ["kubectl", "scale", resource, "--namespace", execution["namespace"], "--replicas=0"]
+            if doc["kind"] == "DisaggregatedSet":
+                patch = [
+                    {"op": "add", "path": f"/spec/roles/{index}/spec/replicas", "value": 0}
+                    for index, _ in enumerate(doc["spec"]["roles"])
+                ]
+                command = [
+                    "kubectl",
+                    "patch",
+                    resource,
+                    "--namespace",
+                    execution["namespace"],
+                    "--type=json",
+                    "--patch",
+                    json.dumps(patch),
+                ]
+            status, stdout, stderr = await self._runner(command)
+            if status:
+                result["stopped"] = False
+                result["error"] = stderr or stdout or f"Could not stop {resource}"
+        return result
+
+    def _uses_delegate_lifecycle(self, artifact):
+        return False

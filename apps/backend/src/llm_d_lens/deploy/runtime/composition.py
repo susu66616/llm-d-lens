@@ -21,7 +21,7 @@ from yaml import YAMLError
 from llm_d_lens.core.hashing import stable_hash
 from llm_d_lens.deploy.data_plane import GATEWAY_MODE_VALUES_PATH, PLAINTEXT_EPP_VALUES_PATH
 from llm_d_lens.deploy.providers.baseline_vllm import BaselineVllmAdapter
-from llm_d_lens.deploy.providers.configuration_manifest import ConfigurationManifestAdapter
+from llm_d_lens.deploy.providers.configuration_manifest import ConfigurationManifestAdapter, SourceCompositionAdapter
 from llm_d_lens.deploy.providers.guide_adapter import GuideDefinition
 from llm_d_lens.deploy.providers.guide_catalog import GuideCatalog
 from llm_d_lens.deploy.providers.hardware_profile import (
@@ -459,6 +459,50 @@ class RestrictedKubectlRunner:
         namespace = command[3] if is_namespace_command else _argument_after(command, "--namespace")
         if namespace is None or not self.allows_namespace(namespace) or namespace == self._namespace_prefix:
             raise RuntimeConfigurationError("Kubernetes command namespace is outside the configured allowlist")
+        if command == ["kubectl", "get", "namespace", namespace, "--namespace", namespace, "-o", "json"]:
+            return
+        is_router_rbac = len(command) > 2 and re.fullmatch(
+            rf"(?:clusterrole|clusterrolebinding)/{re.escape(namespace)}-router-auth-[a-f0-9]{{12}}", command[2]
+        )
+        if is_router_rbac and (
+            command[1] == "get"
+            and command[3:] == ["--namespace", namespace, "--ignore-not-found=true", "-o", "json"]
+            or command[1] == "wait"
+            and command[3:6] == ["--namespace", namespace, "--for=delete"]
+            and len(command) == 7
+            and re.fullmatch(r"--timeout=[1-9][0-9]*s", command[6])
+        ):
+            return
+        if (
+            command[:4] == ["kubectl", "create", "--namespace", namespace]
+            and len(command) == 6
+            and command[4] == "--filename"
+        ):
+            import yaml
+
+            documents = list(yaml.safe_load_all(Path(command[5]).read_text(encoding="utf-8")))
+            rbac = SourceCompositionAdapter.router_rbac(documents, namespace, standalone=True)
+            if not rbac or len(rbac) != len(documents):
+                raise RuntimeConfigurationError("Only namespace-owned Router RBAC may use manifest creation")
+            for doc in rbac:
+                owners = doc["metadata"].get("ownerReferences") or []
+                if (
+                    len(owners) != 1
+                    or owners[0].get("apiVersion") != "v1"
+                    or owners[0].get("kind") != "Namespace"
+                    or owners[0].get("name") != namespace
+                    or not isinstance(owners[0].get("uid"), str)
+                    or not owners[0]["uid"]
+                ):
+                    raise RuntimeConfigurationError("Router RBAC requires an exact namespace UID owner")
+            return
+        if (
+            len(command) == 6
+            and command[1] == "delete"
+            and command[2].startswith(("scaledobject/", "horizontalpodautoscaler/"))
+            and command[3:] == ["--namespace", namespace, "--ignore-not-found=true"]
+        ):
+            return
         diagnostics_commands = {
             ("kubectl", "get", "pods", "--namespace", namespace, "-o", "wide"),
             ("kubectl", "get", "pods", "--namespace", namespace, "-o", "json"),
@@ -868,7 +912,13 @@ def build_deployment_service_from_environment(
                 settings.readiness_timeout_seconds,
             )
             for provider in providers
-        ]
+        ] + [SourceCompositionAdapter(
+            RestrictedKubectlRunner(
+                settings.kubectl_path, settings.namespace_prefix,
+                max(settings.command_timeout_seconds, settings.readiness_timeout_seconds), settings.kubeconfig,
+            ),
+            settings.namespace_prefix, settings.readiness_timeout_seconds,
+        )]
     )
     return GuideAdapterDeploymentService(catalog, build_namespace_factory(settings.namespace_prefix)), catalog
 
