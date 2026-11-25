@@ -683,7 +683,7 @@ baseline replicas = (prefill replicas * prefill TP + decode replicas * decode TP
     - `cluster_session_id`（`string`，必填）
     - `runtime`（`RuntimeSpec`）
     - `benchmark_source`（`BenchmarkSource`，可选）
-    - `benchmark_plans`（`BenchmarkPlan[]`，必填）
+    - `benchmark_plans`（`BenchmarkPlan[]`，必填；1–256 项，ID 必须唯一）
     - `compare_configurations`（`boolean`，默认值 `true`）
 
     ```json

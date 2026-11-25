@@ -238,13 +238,17 @@ async def verify_deployment_execution(execution_id: str, body: RuntimeVerificati
         raise HTTPException(status_code=503, detail="Runtime evidence is unavailable") from error
 
 
-def _ready_model_cache_entry(entries, model: str):
+def _ready_model_cache_entry(entries, model: str, revision: str | None = None):
     expected = model.strip().lower()
     for entry in entries:
         source = getattr(entry, "source", None)
         huggingface = getattr(source, "huggingface", None)
         repo_id = str(getattr(huggingface, "repo_id", "") or "").strip().lower()
-        if repo_id == expected and getattr(entry, "status", "") == "ready":
+        if (
+            repo_id == expected
+            and getattr(entry, "status", "") == "ready"
+            and (revision is None or (getattr(huggingface, "revision", None) or "main") == revision)
+        ):
             return entry
     return None
 
@@ -468,6 +472,9 @@ async def create_standard_kubernetes_service_run(
 ):
     """Create the current vLLM implementation of a Standard service run."""
     try:
+        from llm_d_lens.model_catalog.service import resolve_deployment_model
+
+        request = resolve_deployment_model(request)
         from llm_d_lens.cluster import registry
         from llm_d_lens.cluster import service as cluster_service
         from llm_d_lens.cluster.sessions import require_active_session
@@ -497,7 +504,7 @@ async def create_standard_kubernetes_service_run(
                 cluster_id=session.server_id,
                 storage_volume_id=request.storage_volume_id,
             )
-            ready_entry = _ready_model_cache_entry(entries, request.model)
+            ready_entry = _ready_model_cache_entry(entries, request.model, request.model_revision)
             if ready_entry is None:
                 raise ValueError("selected model is not ready in the selected model cache storage")
             model_revision = ready_entry.source.huggingface.revision

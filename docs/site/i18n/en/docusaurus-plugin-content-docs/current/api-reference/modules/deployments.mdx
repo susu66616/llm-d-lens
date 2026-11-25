@@ -3,8 +3,12 @@ title: Deployments
 description: The main deployment run, execution, and case APIs behind Lens Deploy.
 ---
 
+Model selection and per-deployment parameter overrides use the [Model Catalog](/user-guide/model-market). Custom entries and API fields are described in the [catalog API](/api-reference/modules/model-market).
+
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
+
+New router deployments resolve to `standalone_router` independently of shared Gateway readiness. Router rendering selects EPP/proxy transport from the cluster provider. Publishing and detaching a Model Service manage routing separately and do not change the recorded deployment data plane. Explicit or recorded legacy Gateway-only configurations remain supported.
 
 ## Reviewed DisaggregatedSet plans
 
@@ -3353,3 +3357,18 @@ payload = request.model_dump(mode="json")
 For interrupted cleanup, the cancel endpoint accepts the optional `cluster_session_id` query parameter. It must resolve to the original test cluster; a different cluster is rejected with HTTP 409.
 
 `guideComposition.nativeCpuCacheGiB` also supports `pd-disaggregation` with built-in NixlConnector/kv_both on both roles. The adapter emits ordered MultiConnector children and an image-matched capability init container; saved manifests must retain both. `native_cpu_cache_gib` in measured optimization adds P/D variants as well. Missing adapters, mismatched images, missing roles, and modified cache budgets fail validation. Capability checks do not replace workload correctness tests or benchmarks.
+
+`GET /api/guide-planning/catalog?clusterId=...` also returns `rdmaAccelerators`,
+the hardware-profile variant IDs whose RDMA DeviceClass is advertised by that
+cluster. Missing or unavailable discovery returns an empty list. The configuration
+editor uses this only for new P/D defaults when the source offers an RDMA variant;
+saved and explicitly selected variants are retained. This is capability discovery,
+not a network health or deployment-readiness guarantee.
+
+AIC result decoding now normalizes missing optional dataframe values before
+serialization and rejects non-finite or invalid topology counts. Invalid native
+results become handled AIC errors instead of uncaught server errors. The candidate
+compatibility endpoints return curated initialization/dependency messages when
+available; unclassified exception details remain in the backend log.
+
+Experiment names such as `manual` are labels, not serving modes. The adapter identifies aggregated versus P/D results from their topology columns, including exact estimates with latency targets.

@@ -1061,6 +1061,8 @@ async def check_target(request, body: dict, parsed: list[dict]) -> dict:
 
 
 async def render_router(catalog: dict, body: dict) -> list[dict]:
+    from .data_plane import router_data_plane_args
+
     router = body.get("router") or {}
     if not router.get("values"):
         return []
@@ -1096,6 +1098,16 @@ async def render_router(catalog: dict, body: dict) -> list[dict]:
             if not isinstance(value, str) or "=" not in value:
                 raise GuideError("Invalid router override.")
             args.extend(["--set", value])
+        # Keep the independent proxy and EPP on the same protocol from the first
+        # render. Publication must not later flip only the EPP's transport.
+        args.extend(
+            router_data_plane_args(
+                {
+                    "data_plane": "standalone_router" if router["mode"] == "standalone" else "shared_gateway",
+                    "provenance": {"cluster_server_id": body.get("clusterId")},
+                }
+            )
+        )
         return documents(await command(args))
 
 

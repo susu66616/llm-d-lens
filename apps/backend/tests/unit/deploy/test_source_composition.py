@@ -790,3 +790,49 @@ def test_prefix_affinity_insertion_preserves_decode_profile():
         {"pluginRef": "prefix-cache-affinity-filter"} in profile["plugins"]
         for profile in updated["schedulingProfiles"][:2]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider,secure", [("istio", "false"), ("agentgateway", "false"), ("envoy-ai-gateway", "true"), ("gke", "true")]
+)
+@pytest.mark.parametrize("mode,enabled", [("standalone", "true"), ("gateway", "false")])
+async def test_router_render_manages_both_transport_and_proxy_after_user_overrides(
+    monkeypatch, tmp_path, provider, secure, mode, enabled
+):
+    async def archive(*args):
+        return tmp_path / "router.tgz"
+
+    calls = []
+
+    async def command(args):
+        calls.append(args)
+        return "kind: Service\nmetadata: {name: router}\n"
+
+    from contextlib import nullcontext
+
+    monkeypatch.setattr(composition, "scratch_directory", lambda: nullcontext(tmp_path))
+    monkeypatch.setattr(composition, "chart_archive", archive)
+    monkeypatch.setattr(composition, "command", command)
+    monkeypatch.setattr("llm_d_lens.cluster.registry.get_cluster", lambda _: SimpleNamespace(gateway_provider=provider))
+    result = await composition.render_router(
+        {"assets": [{"path": "router.yaml", "kind": "values", "content": "router: {}"}]},
+        {
+            "namespace": "models",
+            "clusterId": "cluster-a",
+            "router": {
+                "mode": mode,
+                "release": "qwen",
+                "version": "v1.0.0",
+                "values": [{"path": "router.yaml"}],
+                "set": ["router.epp.flags.secure-serving=wrong", "router.proxy.enabled=wrong"],
+            },
+        },
+    )
+    assert result[0]["kind"] == "Service"
+    assert calls[0][-4:] == [
+        "--set",
+        f"router.epp.flags.secure-serving={secure}",
+        "--set",
+        f"router.proxy.enabled={enabled}",
+    ]

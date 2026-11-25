@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import yaml
 
 from llm_d_lens.cluster.registry import gateway_namespace_for
 from llm_d_lens.db.dao.model_service_gateway_operation import GatewayOperationDao
@@ -122,6 +123,22 @@ class _FakeRunner:
             return _Result(stdout="True")
         if list(argv[:3]) == ["kubectl", "get", "gateway"]:
             return _Result(stdout="True")
+        if list(argv[:3]) == ["kubectl", "get", "deploy"] and "json" in argv:
+            return _Result(
+                stdout=json.dumps(
+                    {
+                        "spec": {
+                            "template": {
+                                "spec": {
+                                    "containers": [
+                                        {"name": "epp", "args": ["--pool-name=qwen", "--secure-serving=false"]}
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                )
+            )
         return _Result(stdout="applied")
 
 
@@ -518,6 +535,13 @@ async def test_reconcile_removes_route_for_memberless_group(monkeypatch):
     assert operation.detail_json["removed"] == 1
     deletes = [c for c in calls if list(c[0][:3]) == ["kubectl", "delete", "httproute"]]
     assert deletes and deletes[0][0][3] == "qwen-empty"
+    # Detachment only cleans publication resources; the standalone deployment
+    # and its mounted configuration must not be changed or restarted.
+    assert not any(list(argv[:2]) in (["kubectl", "patch"], ["kubectl", "rollout"]) for argv, _ in calls)
+    assert not any(
+        argv[:2] == ["kubectl", "delete"] and argv[2] in {"deploy", "statefulset", "svc", "inferencepool"}
+        for argv, _ in calls
+    )
 
 
 @pytest.mark.asyncio
@@ -844,62 +868,105 @@ async def test_get_ipp_config_falls_back_to_default_when_no_custom(monkeypatch):
 
 
 class _TlsEppRunner(_FakeRunner):
-    """An EPP Deployment left on the default secure-serving=true (TLS)."""
+    """A live EPP and the standalone Envoy ConfigMap it mounts."""
 
-    def __init__(self, calls):
+    def __init__(self, calls, *, secure=True, proxy_secure=True, kind="Deployment"):
         super().__init__(calls)
-        self.patched = None
+        self.workload = {
+            "apiVersion": "apps/v1",
+            "kind": kind,
+            "metadata": {"name": "qwen-epp", "uid": "router-uid"},
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [
+                            {"name": "envoy-proxy", "volumeMounts": [{"name": "proxy", "mountPath": "/etc/envoy"}]},
+                            {"name": "epp", "args": ["--pool-name", "qwen", f"--secure-serving={str(secure).lower()}"]},
+                        ],
+                        "volumes": [{"name": "proxy", "configMap": {"name": "qwen-proxy-config"}}],
+                    }
+                }
+            },
+        }
+        cluster = {"name": "ext_proc", "health_checks": [{"grpc_health_check": {}}]}
+        if proxy_secure:
+            cluster["transport_socket"] = {"name": "envoy.transport_sockets.tls"}
+            cluster["health_checks"][0]["tls_options"] = {"alpn_protocols": ["h2"]}
+        self.configmap = {"data": {"envoy.yaml": yaml.safe_dump({"static_resources": {"clusters": [cluster]}})}}
+        self.patches = []
+        self.prepared = []
 
     async def run(self, argv, *, cwd=None, env=None, input=None, timeout=10):  # noqa: A002
         self.calls.append((argv, input))
-        if list(argv[:3]) == ["kubectl", "get", "deploy"] and "-o" in argv and "json" in argv:
-            return _Result(
-                stdout=(
-                    '{"spec":{"template":{"spec":{"containers":['
-                    '{"name":"envoy-proxy","args":["--log-level","warn"]},'
-                    '{"name":"epp","args":["--pool-name","qwen","--secure-serving=true"]}'
-                    "]}}}}"
-                )
-            )
-        if list(argv[:3]) == ["kubectl", "patch", "deploy"]:
-            self.patched = argv
+        if list(argv[:2]) == ["kubectl", "get"] and argv[2] in {"deploy", "statefulset"}:
+            expected = "deploy" if self.workload["kind"] == "Deployment" else "statefulset"
+            return _Result(stdout=json.dumps(self.workload) if argv[2] == expected else "")
+        if list(argv[:3]) == ["kubectl", "get", "configmap"]:
+            return _Result(stdout=json.dumps(self.configmap))
+        if list(argv[:2]) == ["kubectl", "patch"]:
+            self.patches.append(json.loads(argv[-1]))
             return _Result(stdout="patched")
+        if list(argv[:3]) == ["kubectl", "apply", "-f"]:
+            self.prepared.extend(yaml.safe_load_all(input))
+            return _Result(stdout="applied")
         return await super().run(argv, cwd=cwd, env=env, input=input, timeout=timeout)
 
 
 @pytest.mark.asyncio
-async def test_ensure_epp_plaintext_rewrites_secure_serving():
-    """Regression: an EPP on TLS (secure-serving=true) must be switched to plaintext."""
-    calls: list = []
-    runner = _TlsEppRunner(calls)
-    service = GatewayOpsService(runner_factory=lambda _cid: runner)
-    changed = await service._ensure_epp_plaintext("cluster-a", "ns", "qwen-epp")
-    assert changed is True
-    assert runner.patched is not None
-    assert "--secure-serving=false" in runner.patched[-1]
-    assert "/spec/template/spec/containers/1/args/2" in runner.patched[-1]
+@pytest.mark.parametrize("kind", ["Deployment", "StatefulSet"])
+@pytest.mark.parametrize(
+    "secure,proxy_secure,target", [(True, True, False), (False, True, False), (False, False, True)]
+)
+async def test_epp_transport_updates_both_sides_together(kind, secure, proxy_secure, target):
+    runner = _TlsEppRunner([], secure=secure, proxy_secure=proxy_secure, kind=kind)
+    service = GatewayOpsService(runner_factory=lambda _: runner)
+    assert await service._ensure_epp_transport("cluster-a", "ns", "qwen-epp", secure_serving=target)
+    assert len(runner.patches) == len(runner.prepared) == 1
+    patch = runner.patches[0]
+    assert patch[0]["op"] == "test"
+    refs = [p for p in patch if p["path"].endswith("/configMap/name")]
+    assert refs[0]["value"] == runner.prepared[0]["metadata"]["name"]
+    assert refs[0]["value"] != "qwen-proxy-config"
+    clusters = yaml.safe_load(runner.prepared[0]["data"]["envoy.yaml"])["static_resources"]["clusters"]
+    assert ("transport_socket" in clusters[0]) is target
+    assert ("tls_options" in clusters[0]["health_checks"][0]) is target
+    args = [p for p in patch if p["path"].endswith("/args")]
+    if secure != target:
+        assert f"--secure-serving={str(target).lower()}" in args[0]["value"]
+    else:
+        assert not args  # Repair an already-broken proxy even if EPP is correct.
+    actions = [list(argv[:2]) for argv, _ in runner.calls]
+    assert actions.index(["kubectl", "apply"]) < actions.index(["kubectl", "patch"])
+    assert ["kubectl", "rollout"] in actions
 
 
 @pytest.mark.asyncio
-async def test_ensure_epp_plaintext_is_noop_when_already_plaintext():
-    calls: list = []
+@pytest.mark.parametrize("secure", [False, True])
+async def test_epp_transport_is_idempotent_when_both_sides_match(secure):
+    runner = _TlsEppRunner([], secure=secure, proxy_secure=secure)
+    service = GatewayOpsService(runner_factory=lambda _: runner)
+    assert not await service._ensure_epp_transport("cluster-a", "ns", "qwen-epp", secure_serving=secure)
+    assert not runner.patches and not runner.prepared
 
-    class R(_FakeRunner):
-        async def run(self, argv, *, cwd=None, env=None, input=None, timeout=10):  # noqa: A002
-            if list(argv[:3]) == ["kubectl", "get", "deploy"]:
-                return _Result(
-                    stdout=(
-                        '{"spec":{"template":{"spec":{"containers":['
-                        '{"name":"epp","args":["--pool-name","qwen","--secure-serving=false"]}'
-                        "]}}}}"
-                    )
-                )
-            if list(argv[:3]) == ["kubectl", "patch", "deploy"]:
-                raise AssertionError("must not patch an already-plaintext EPP")
-            return await super().run(argv, cwd=cwd, env=env, input=input, timeout=timeout)
 
-    service = GatewayOpsService(runner_factory=lambda _cid: R(calls))
-    assert await service._ensure_epp_plaintext("cluster-a", "ns", "qwen-epp") is False
+@pytest.mark.asyncio
+async def test_epp_transport_rejects_unknown_proxy_before_patching_epp():
+    runner = _TlsEppRunner([])
+    runner.configmap = {"data": {"custom.yaml": "unknown: true"}}
+    service = GatewayOpsService(runner_factory=lambda _: runner)
+    with pytest.raises(gateway_ops_module.GatewayOpsError, match="unsupported"):
+        await service._ensure_epp_transport("cluster-a", "ns", "qwen-epp", secure_serving=False)
+    assert not runner.patches
+
+
+@pytest.mark.asyncio
+async def test_epp_transport_preparation_failure_does_not_patch_epp(monkeypatch):
+    runner = _TlsEppRunner([])
+    service = GatewayOpsService(runner_factory=lambda _: runner)
+    monkeypatch.setattr(service, "_apply_documents", AsyncMock(return_value=_Result(returncode=1, stderr="denied")))
+    with pytest.raises(gateway_ops_module.GatewayOpsError, match="denied"):
+        await service._ensure_epp_transport("cluster-a", "ns", "qwen-epp", secure_serving=False)
+    assert not runner.patches
 
 
 @pytest.mark.asyncio
@@ -1308,12 +1375,12 @@ async def test_reconcile_heals_secure_serving_on_an_unhealthy_member(monkeypatch
         ),
     )
     heal = AsyncMock(return_value=True)
-    monkeypatch.setattr(service, "_ensure_epp_plaintext", heal)
+    monkeypatch.setattr(service, "_ensure_epp_transport", heal)
 
     operation = await service.reconcile_cluster_gateway("cluster-unhealthy")
 
     assert operation.status == "succeeded"
-    heal.assert_awaited_once_with("cluster-unhealthy", "ns", "qwen-epp", on_log=None)
+    heal.assert_awaited_once_with("cluster-unhealthy", "ns", "qwen-epp", secure_serving=False, on_log=None)
 
 
 @pytest.mark.asyncio
@@ -1909,3 +1976,78 @@ async def test_reconcile_fails_after_only_one_stale_discovery_retry(monkeypatch)
     assert "no matches for kind" in operation.message
     assert invalidated == ["cluster-a"]
     assert len(attempts) == 2
+
+
+@pytest.mark.asyncio
+async def test_reconcile_transport_failure_does_not_submit_model_routes(monkeypatch):
+    _seed_member("cluster-a")
+    calls = []
+    service = _service(calls=calls)
+    monkeypatch.setattr(
+        gateway_ops_module,
+        "get_cluster",
+        lambda _: SimpleNamespace(
+            gateway_provider="istio", gateway_namespace="lens-gateway", gateway_name="lens-inference-gateway"
+        ),
+    )
+    monkeypatch.setattr(
+        service, "_ensure_epp_transport", AsyncMock(side_effect=gateway_ops_module.GatewayOpsError("rollout failed"))
+    )
+    operation = await service.reconcile_cluster_gateway("cluster-a")
+    assert operation.status == "failed"
+    assert "rollout failed" in operation.message
+    applied = [
+        doc
+        for argv, content in calls
+        if argv[:3] == ["kubectl", "apply", "-f"] and content
+        for doc in yaml.safe_load_all(content)
+        if doc
+    ]
+    assert not any(doc["kind"] == "HTTPRoute" for doc in applied)
+
+
+@pytest.mark.asyncio
+async def test_retry_waits_for_rollout_even_when_transport_already_matches(monkeypatch):
+    runner = _TlsEppRunner([], secure=False, proxy_secure=False)
+    service = GatewayOpsService(runner_factory=lambda _: runner)
+    run = runner.run
+
+    async def failed_rollout(argv, **kwargs):
+        if list(argv[:3]) == ["kubectl", "rollout", "status"]:
+            return _Result(returncode=1, stderr="rollout still pending")
+        return await run(argv, **kwargs)
+
+    monkeypatch.setattr(runner, "run", failed_rollout)
+    with pytest.raises(gateway_ops_module.GatewayOpsError, match="rollout still pending"):
+        await service._ensure_epp_transport("cluster-a", "ns", "qwen-epp", secure_serving=False)
+    assert not runner.patches
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proxy_secure", [False, True])
+async def test_separate_proxy_is_validated_before_switching_epp(monkeypatch, proxy_secure):
+    from copy import deepcopy
+
+    runner = _TlsEppRunner([], proxy_secure=proxy_secure)
+    separate = deepcopy(runner.workload)
+    separate["metadata"]["name"] = "qwen-proxy"
+    separate["spec"]["template"]["spec"]["containers"].pop()
+    runner.workload["spec"]["template"]["spec"]["containers"].pop(0)
+    runner.workload["spec"]["template"]["spec"]["volumes"] = []
+    service = GatewayOpsService(runner_factory=lambda _: runner)
+    run = runner.run
+
+    async def with_proxy(argv, **kwargs):
+        if list(argv[:4]) == ["kubectl", "get", "deploy", "qwen-proxy"]:
+            return _Result(stdout=json.dumps(separate))
+        return await run(argv, **kwargs)
+
+    monkeypatch.setattr(runner, "run", with_proxy)
+    if proxy_secure:
+        with pytest.raises(gateway_ops_module.GatewayOpsError, match="Separate standalone proxy"):
+            await service._ensure_epp_transport("cluster-a", "ns", "qwen-epp", secure_serving=False)
+        assert not runner.patches and not runner.prepared
+    else:
+        assert await service._ensure_epp_transport("cluster-a", "ns", "qwen-epp", secure_serving=False)
+        assert len(runner.patches) == 1
+        assert not runner.prepared

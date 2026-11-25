@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from llm_d_lens.evaluation.models import BenchmarkPlan, BenchmarkSource
+from llm_d_lens.evaluation.models import BenchmarkPlan, BenchmarkSource, EvaluationCreateRequest
 from llm_d_lens.evaluation.router import (
     _cluster_benchmark_runtime,
     _execution_accelerator_profile,
@@ -444,3 +444,27 @@ def test_benchmark_request_accepts_profile_identifiers(profile):
         accelerator_profile=profile,
     )
     assert request.accelerator_profile == profile
+
+
+@pytest.mark.parametrize("count", [1, 128, 256])
+def test_evaluation_accepts_parameter_sweep_batches(count):
+    request = EvaluationCreateRequest(
+        cluster_session_id="00000000-0000-4000-8000-000000000001",
+        benchmark_plans=[
+            {"id": f"configuration-{index}", "configuration_artifact_id": f"00000000-0000-4000-8000-{index:012d}"}
+            for index in range(count)
+        ],
+    )
+    assert len(request.benchmark_plans) == count
+
+
+@pytest.mark.parametrize("count", [0, 257])
+def test_evaluation_rejects_empty_or_oversized_parameter_sweep_batches(count):
+    with pytest.raises(ValidationError):
+        EvaluationCreateRequest(
+            cluster_session_id="00000000-0000-4000-8000-000000000001",
+            benchmark_plans=[
+                {"id": f"configuration-{index}", "configuration_artifact_id": f"00000000-0000-4000-8000-{index:012d}"}
+                for index in range(count)
+            ],
+        )

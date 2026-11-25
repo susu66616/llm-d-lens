@@ -23,6 +23,7 @@ from llm_d_lens.db.models import group as group  # noqa: F401
 from llm_d_lens.db.models import identity_provider as identity_provider  # noqa: F401
 from llm_d_lens.db.models import model_access_token as model_access_token  # noqa: F401
 from llm_d_lens.db.models import model_cache_entry as model_cache_entry  # noqa: F401
+from llm_d_lens.db.models import model_catalog_entry as model_catalog_entry  # noqa: F401
 from llm_d_lens.db.models import (  # noqa: F401
     model_service_gateway_operation as model_service_gateway_operation,
 )

@@ -128,3 +128,10 @@ test('automatic additions preserve sized candidate topology and do not install i
         assert.match(draft.optimizationDecisions.find(item => item.id === 'coordinator').reason, /sized serving topology/);
     }
 });
+
+
+test('explicitly disabled tool calling becomes a disabling source flag', () => {
+    const tools = { request: { ...run.request, vllm_arguments: [{ name: 'enable-auto-tool-choice', value: 'false' }] } };
+    const parameters = candidateCompositionDraft(tools, candidate, catalog, profile, entry, volume).runtimeConfiguration.customParameters;
+    assert.deepEqual(parameters.map(item => [item.name, item.value]), [['no-enable-auto-tool-choice', '']]);
+});

@@ -2,13 +2,14 @@
 
 The cluster installs ONE shared Gateway (provider-selectable) at creation; each
 model service publishes an HTTPRoute -> InferencePool plus IPP model-mapping.
-Deployments own their InferencePool + EPP and run no proxy. Design reference:
+Deployments retain their InferencePool, EPP and independent standalone proxy. Design reference:
 docs/design/model-service-design.md#lens-model-service-design-per-cluster-native-llm-d sections 5/10.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from copy import deepcopy
 
 import httpx
 import yaml
@@ -55,6 +57,7 @@ from llm_d_lens.model_service.gateway_providers import (
     authz_tls_insecure_enabled,
     default_pool_name,
     ensure_istioctl,
+    epp_secure_serving,
     model_rewrite_name,
     provider_spec,
     render_inference_gateway,
@@ -1528,62 +1531,204 @@ class GatewayOpsService:
         )
         return self._finish(operation, ok=True, message=f"IPP removed ({name})")
 
-    async def _ensure_epp_plaintext(
-        self, cluster_id: str, namespace: str, epp_name: str, *, on_log: OnLog | None = None
+    async def _ensure_epp_transport(
+        self, cluster_id: str, namespace: str, epp_name: str, *, secure_serving: bool, on_log: OnLog | None = None
     ) -> bool:
-        """Flip a deployment's EPP to plaintext serving if it was created with TLS.
+        """Repair EPP and standalone transport together, retaining independent access.
 
-        The cluster Gateway reaches the EPP over plaintext h2c; an EPP left on the
-        default ``secure-serving=true`` resets the ext_proc stream (HTTP 500). Older
-        deployments predate the gateway-mode router values, so heal them in place.
+        Versioned ConfigMaps keep the running proxy on its old configuration
+        until the same Pod-template update switches both EPP and proxy. A
+        failed update leaves the old ConfigMap available for rollback.
         """
-        try:
+        workload = None
+        for kind in ("deploy", "statefulset"):
             result = await self._kubectl(
-                cluster_id, ["get", "deploy", epp_name, "-n", namespace, "-o", "json"], timeout=20
+                cluster_id,
+                ["get", kind, epp_name, "-n", namespace, "-o", "json", "--ignore-not-found=true"],
+                timeout=20,
             )
-        except (FileNotFoundError, TimeoutError, OSError):
-            return False
-        if result.returncode != 0:
-            return False
-        try:
-            deployment = json.loads(result.stdout or "{}")
-        except ValueError:
-            return False
-        containers = deployment.get("spec", {}).get("template", {}).get("spec", {}).get("containers") or []
+            if result.returncode:
+                raise GatewayOpsError(result.stderr or f"Cannot inspect Router {namespace}/{epp_name}")
+            workload = _kubectl_object(result.stdout)
+            if workload:
+                break
+        if not workload:
+            raise GatewayOpsError(f"Router workload not found: {namespace}/{epp_name}")
+        pod = workload.get("spec", {}).get("template", {}).get("spec", {})
+        containers = pod.get("containers") or []
+        patch = []
         for index, container in enumerate(containers):
             args = list(container.get("args") or [])
-            # Identify the EPP container (the sidecar has no --pool-name/--grpc-port).
             if not any(a.startswith("--pool-name") or a.startswith("--grpc-port") for a in args):
                 continue
             flag_index = next((i for i, a in enumerate(args) if a.startswith("--secure-serving")), None)
+            flag = f"--secure-serving={str(secure_serving).lower()}"
             if flag_index is not None:
-                if args[flag_index] == "--secure-serving=false":
-                    return False
-                patch = [
-                    {
-                        "op": "replace",
-                        "path": f"/spec/template/spec/containers/{index}/args/{flag_index}",
-                        "value": "--secure-serving=false",
-                    }
-                ]
+                if (
+                    args[flag_index] == "--secure-serving"
+                    and flag_index + 1 < len(args)
+                    and args[flag_index + 1] in {"true", "false"}
+                ):
+                    del args[flag_index + 1]
+                args[flag_index] = flag
             else:
-                patch = [
-                    {
-                        "op": "add",
-                        "path": f"/spec/template/spec/containers/{index}/args/-",
-                        "value": "--secure-serving=false",
-                    }
-                ]
-            await self._log(on_log, f"EPP {namespace}/{epp_name}: set secure-serving=false (plaintext ext_proc)")
+                args.append(flag)
+            if args != container.get("args"):
+                patch.append({"op": "replace", "path": f"/spec/template/spec/containers/{index}/args", "value": args})
+            break
+        else:
+            raise GatewayOpsError(f"EPP container not found in Router {namespace}/{epp_name}")
+
+        proxy_patch = await self._prepare_proxy_transport(cluster_id, namespace, workload, secure_serving)
+        patch.extend(proxy_patch)
+        # Refuse to patch a different Pod template if an operator changed it
+        # while its proxy configuration was being prepared.
+        if patch:
+            patch.insert(0, {"op": "test", "path": "/spec/template/spec", "value": pod})
+            await self._log(on_log, f"Router {namespace}/{epp_name}: synchronize EPP and standalone proxy transport")
             applied = await self._kubectl(
                 cluster_id,
-                ["patch", "deploy", epp_name, "-n", namespace, "--type=json", "-p", json.dumps(patch)],
+                ["patch", kind, epp_name, "-n", namespace, "--type=json", "-p", json.dumps(patch)],
                 timeout=30,
             )
-            if applied.returncode != 0:
-                await self._log(on_log, f"EPP patch failed: {(applied.stderr or '').strip()}")
-            return applied.returncode == 0
-        return False
+            if applied.returncode:
+                raise GatewayOpsError(applied.stderr or "Router transport update failed")
+        # A retry after a timed-out rollout must still wait for the new Pods.
+        ready = await self._kubectl(
+            cluster_id, ["rollout", "status", f"{kind}/{epp_name}", "-n", namespace, "--timeout=120s"], timeout=130
+        )
+        if ready.returncode:
+            raise GatewayOpsError(ready.stderr or "Router transport rollout is not ready")
+        return bool(patch)
+
+    async def _prepare_proxy_transport(
+        self, cluster_id: str, namespace: str, workload: dict, secure: bool, *, allow_changes: bool = True
+    ) -> list[dict]:
+        """Stage compatible standalone ConfigMaps without changing running Pods."""
+        pod = workload.get("spec", {}).get("template", {}).get("spec", {})
+        proxies = [
+            c
+            for c in pod.get("containers", [])
+            if any(
+                token in f"{c.get('name', '')} {c.get('image', '')}".lower()
+                for token in ("envoy", "agentgateway", "proxy")
+            )
+        ]
+        if not proxies and allow_changes:
+            # Service-mode proxies are separate workloads. Validate their
+            # transport before touching EPP; changing both requires a planned
+            # redeployment rather than two independent live rollouts.
+            name = workload.get("metadata", {}).get("name", "")
+            if name.endswith("-epp"):
+                proxy_name = name.removesuffix("-epp") + "-proxy"
+                result = await self._kubectl(
+                    cluster_id,
+                    ["get", "deploy", proxy_name, "-n", namespace, "-o", "json", "--ignore-not-found=true"],
+                    timeout=20,
+                )
+                if result.returncode:
+                    raise GatewayOpsError(result.stderr or f"Cannot inspect standalone proxy {proxy_name}")
+                separate = _kubectl_object(result.stdout)
+                if separate:
+                    await self._prepare_proxy_transport(cluster_id, namespace, separate, secure, allow_changes=False)
+        mounts = {m["name"] for c in proxies for m in c.get("volumeMounts", [])}
+        patch = []
+        recognized = not proxies
+        for index, volume in enumerate(pod.get("volumes", [])):
+            if volume.get("name") not in mounts or "configMap" not in volume:
+                continue
+            name = volume["configMap"]["name"]
+            result = await self._kubectl(
+                cluster_id, ["get", "configmap", name, "-n", namespace, "-o", "json"], timeout=20
+            )
+            if result.returncode:
+                raise GatewayOpsError(result.stderr or f"Cannot read standalone configuration {namespace}/{name}")
+            configmap = _kubectl_object(result.stdout) or {}
+            data = deepcopy(configmap.get("data") or {})
+            changed = False
+            for key, content in data.items():
+                try:
+                    config = yaml.safe_load(content)
+                except yaml.YAMLError:
+                    continue
+                if not isinstance(config, dict):
+                    continue
+                original = deepcopy(config)
+                # The upstream agentgateway standalone config uses plaintext
+                # endpointPicker.host. Do not invent a TLS migration for it.
+                for bind in config.get("binds", []):
+                    for listener in bind.get("listeners", []):
+                        for route in listener.get("routes", []):
+                            for backend in route.get("backends", []):
+                                picker = backend.get("policies", {}).get("inferenceRouting", {}).get("endpointPicker")
+                                if picker:
+                                    if secure or set(picker) != {"host"}:
+                                        raise GatewayOpsError(
+                                            "Standalone agentgateway transport is incompatible; "
+                                            "redeploy with an Envoy proxy before publishing"
+                                        )
+                                    recognized = True
+                clusters = config.get("static_resources", {}).get("clusters", [])
+                for cluster in clusters:
+                    if cluster.get("name") != "ext_proc":
+                        continue
+                    recognized = True
+                    if secure:
+                        cluster.setdefault(
+                            "transport_socket",
+                            {
+                                "name": "envoy.transport_sockets.tls",
+                                "typed_config": {
+                                        "@type": (
+                                            "type.googleapis.com/"
+                                            "envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext"
+                                        ),
+                                    "common_tls_context": {"validation_context": {}},
+                                },
+                            },
+                        )
+                    else:
+                        cluster.pop("transport_socket", None)
+                    for check in cluster.get("health_checks", []):
+                        if secure:
+                            check.setdefault("tls_options", {"alpn_protocols": ["h2"]})
+                        else:
+                            check.pop("tls_options", None)
+                if config != original:
+                    data[key] = yaml.safe_dump(config, sort_keys=False)
+                    changed = True
+            if not changed:
+                continue
+            if not allow_changes:
+                raise GatewayOpsError(
+                    "Separate standalone proxy requires a transport update; redeploy before publishing"
+                )
+            digest = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:12]
+            base_name = re.sub(r"-transport-[0-9a-f]{12}$", "", name)[:220]
+            new_name = f"{base_name}-transport-{digest}"
+            metadata = {"name": new_name, "namespace": namespace}
+            owner = workload.get("metadata", {})
+            if owner.get("uid"):
+                metadata["ownerReferences"] = [
+                    {
+                        "apiVersion": workload.get("apiVersion", "apps/v1"),
+                        "kind": workload.get("kind", "Deployment"),
+                        "name": owner["name"],
+                        "uid": owner["uid"],
+                    }
+                ]
+            prepared = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": metadata, "data": data}
+            applied = await self._apply_documents(cluster_id, [yaml.safe_dump(prepared, sort_keys=False)])
+            if applied.returncode:
+                raise GatewayOpsError(applied.stderr or "Cannot prepare standalone proxy transport")
+            patch.append(
+                {"op": "replace", "path": f"/spec/template/spec/volumes/{index}/configMap/name", "value": new_name}
+            )
+        if not recognized:
+            raise GatewayOpsError(
+                "Standalone proxy configuration is unsupported; regenerate the deployment before publishing"
+            )
+        return patch
 
     async def reconcile_cluster_gateway(
         self, cluster_id: str, *, actor: str | None = None, on_log: OnLog | None = None
@@ -1627,8 +1772,11 @@ class GatewayOpsService:
         by_group: dict[str, list] = {}
         for member in self.members.list_by_cluster(cluster_id):
             by_group.setdefault(member.group_id, []).append(member)
-        # Heal members whose EPP predates the plaintext gateway-mode requirement.
-        await self._heal_member_epps(cluster_id, provider=provider, on_log=on_log)
+        # Repair both sides of the deployment transport before publishing routes.
+        try:
+            await self._heal_member_epps(cluster_id, provider=provider, on_log=on_log)
+        except (GatewayOpsError, ValueError, OSError, TimeoutError) as error:
+            return self._finish(operation, ok=False, message=f"Router transport reconciliation failed: {error}")
         applied_names: set[str] = set()
         rewrite_documents: list[str] = []
         applied_rewrites: set[tuple[str, str]] = set()
@@ -1950,24 +2098,20 @@ class GatewayOpsService:
             await self.install_ipp(cluster_id, actor=None)
         except Exception as error:  # noqa: BLE001 - best effort; the probe retries
             logger.warning("data-plane auto-heal IPP failed for %s: %s", cluster_id, error)
-        await self._heal_member_epps(cluster_id)
+        try:
+            await self._heal_member_epps(cluster_id)
+        except GatewayOpsError as error:
+            logger.warning("data-plane auto-heal Router failed for %s: %s", cluster_id, error)
 
     async def _heal_member_epps(
         self, cluster_id: str, *, provider: str | None = None, on_log: OnLog | None = None
     ) -> None:
-        """Force plaintext ext_proc on published EPPs that still default to TLS.
-
-        Only istio/agentgateway reach the EPP over plaintext h2c; envoy-ai-gateway
-        and gke expect TLS, so forcing plaintext there would break the ext_proc.
-        An unhealthy probe can be the secure-serving symptom itself, so status does
-        not suppress healing; only explicitly disabled members are skipped.
-        """
+        """Synchronize both EPP and retained standalone proxy for publication."""
         cluster = get_cluster(cluster_id)
         if cluster is None:
             return
         provider = provider or cluster.gateway_provider or DEFAULT_PROVIDER
-        if provider not in ("istio", "agentgateway"):
-            return
+        secure = epp_secure_serving(provider=provider)
         groups = {group.id: group for group in self.groups.list()}
         healed: set[tuple[str, str]] = set()
         for member in self.members.list_by_cluster(cluster_id):
@@ -1981,7 +2125,9 @@ class GatewayOpsService:
             if key in healed:
                 continue
             healed.add(key)
-            await self._ensure_epp_plaintext(cluster_id, member.target_namespace, epp_name, on_log=on_log)
+            await self._ensure_epp_transport(
+                cluster_id, member.target_namespace, epp_name, secure_serving=secure, on_log=on_log
+            )
 
     async def _member_health(self, member) -> tuple[bool, dict]:
         checked = utcnow().isoformat()

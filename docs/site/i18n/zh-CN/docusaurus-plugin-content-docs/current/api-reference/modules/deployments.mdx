@@ -3,8 +3,12 @@ title: 部署
 description: Lens 部署功能背后的主要部署运行、执行和用例 API。
 ---
 
+模型选择和本次部署参数覆盖使用 [Model Catalog](/user-guide/model-market)。自定义条目和 API 字段参见[目录 API](/api-reference/modules/model-market)。
+
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
+
+新建 Router 部署默认解析为 `standalone_router`，不依赖共享 Gateway 是否就绪。渲染 Router 时根据集群 provider 统一配置 EPP/Proxy 协议。发布或解绑 Model Service 单独管理路由，不改变已记录的部署数据平面；显式选择或历史记录中的 Gateway-only 配置仍受支持。
 
 ## DisaggregatedSet 审核计划
 
@@ -3089,3 +3093,14 @@ payload = request.model_dump(mode="json")
 清理中断任务时，取消端点接受可选查询参数 `cluster_session_id`，必须指向原测试集群；其他集群会返回 HTTP 409。
 
 `guideComposition.nativeCpuCacheGiB` 支持两种角色均使用内置 NixlConnector/kv_both 的 `pd-disaggregation`。适配器生成有序 MultiConnector 子连接器及相同镜像的能力检查初始化容器，保存的清单必须保留两者。实测优化中的 `native_cpu_cache_gib` 也会添加 P/D 变体。缺少适配器、镜像不匹配、角色缺失或缓存预算被修改均会校验失败。能力检查不能替代负载正确性测试和基准测试。
+
+`GET /api/guide-planning/catalog?clusterId=...` 还返回 `rdmaAccelerators`，列出该集群
+已公布 RDMA DeviceClass 的硬件配置变体 ID。缺少对应资源或发现不可用时返回空列表。
+配置编辑器仅在新建 PD 配置且来源提供 RDMA 变体时使用此默认值；已保存或手动选择的变体
+会保留。这表示能力发现，并不保证网络健康或部署就绪。
+
+AIC 结果解析会在序列化前规范化缺失的可选数据值，并拒绝非有限值或无效的拓扑数量。
+无效原生结果转换为受控的 AIC 错误，不再作为未捕获的服务器错误。
+候选兼容接口可返回经过明确标记的初始化或依赖诊断；未分类的异常细节仍仅记录在后端日志中。
+
+`manual` 等实验名称仅为标签，不代表服务模式。适配器根据结果的拓扑列识别聚合或 PD 模式，也适用于带延迟目标的精确估算。
