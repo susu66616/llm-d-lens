@@ -774,17 +774,31 @@ Agentic 负载目标规划会直接校验 AIC 原生推荐的精确拓扑，包�
   <TabItem value="rest-api" label="REST API">
     **`POST /api/v1/aic/search`**
 
-    `mean_input_tokens` 默认 `4000`，`mean_output_tokens` 默认 `1000`，与 AIC 原生
-    search/recommend 一致。可以提供正数 `target_concurrency` 或 `target_request_rate`
-    （每秒请求数），二选一；两项均不提供时保留固定 GPU 数搜索。
+    搜索和推荐仅使用 AISimulate engine replay Sweeper，不再调用分析型搜索或推荐，
+    也不再按比例外推副本或吞吐。`mean_input_tokens` 默认 `4000`，`mean_output_tokens`
+    默认 `1000`。可以提供正整数 `target_concurrency` 或正数 `target_request_rate`
+    （泊松到达，每秒请求数），二选一；均省略时使用并发 `1` 的固定预算搜索，不表示饱和容量。
     同时提供会被拒绝，错误中会明确说明 AIC 不支持联合负载目标。
     Agentic 将 `planning_facts.workload_profile.concurrency` 和 `.request_rate`
     映射到这些字段；QPS 和 request rate 是同一项。
 
-    存在负载目标时，`gpu_count` 是 Lens 的验收预算，不传给原生 recommend。
-    Lens 会扩展推荐的各 worker 池，只接受所需 GPU 不超预算且满足 TTFT/TPOT 目标
-    （原生默认 `2000`/`30` 毫秒）的配置。预测不可用、容量不足或 SLO 无法满足时，
-    会明确报错，不会悄悄选择没有负载目标的预测。对请求速率目标，Agentic 会将原因传到前端错误提示区。
+    `gpu_count` 直接限制原生搜索空间。提供负载目标时，先按 GPU 数、再按 replay 输出吞吐排序；
+    无负载目标时按 replay 输出吞吐排序。只接受完整完成、不超 GPU 预算且满足均值
+    TTFT/TPOT 目标（默认 `2000`/`30` 毫秒）的配置。TPOT 不等于 ITL。
+    QPS 搜索额外要求原生 goodput 不低于目标 QPS。`num_requests` 默认 `32`，并发 replay
+    至少使用并发数两倍的请求。`max_evaluations` 默认 `32`，范围 `1` 到 `256`；
+    单次评估限时 `20` 秒，使用一个评估 worker。
+    搜索明确使用原生 `random` 算法和种子 `42`，不使用贝叶斯优化。
+    有限配置采用无放回抽样；有界搜索不保证覆盖全部配置。
+    搜索另有 `60` 秒墙钟时间预算，Manual 规划也适用。每个候选结束后检查预算；
+    当前评估可能继续运行至完成或达到 `20` 秒上限，随后停止搜索并清理工作进程。
+    已完成的可行预测会被保留，预算耗尽时响应附带警告；此预算不是 HTTP 响应的硬截止时间。
+    找不到可接受候选时明确报错，不回退分析方式；有界搜索失败不代表不存在可行配置。
+    响应标记 `execution_mode: "engine_replay"`、运行配置 `aisimulate-engine-replay-v1`、
+    `evaluated_candidates` 及 `search_complete: false`。候选包含原生 `replay_metrics` 和
+    `engine_configuration`，复现时需同时采用这些引擎设置和拓扑。不表示满足分位数 SLO、
+    全局最优或真实精度认证。独立命名的旧版 `/experiments` YAML API 不变，
+    estimate 和 recommend 都不会调用它。对请求速率目标，Agentic 会将失败原因传到前端错误提示区。
     AIC 无法预测并发目标时，Agentic 与 Manual 规划继续使用确定性候选，并按单副本 KV 容量和
     `max_num_seqs` 计算服务副本数；`planning_facts.objective`（`balanced`、`latency`、
     `throughput`、`cost` 或 `reliability`）取自 `requirements.objective`。
@@ -801,7 +815,7 @@ Agentic 负载目标规划会直接校验 AIC 原生推荐的精确拓扑，包�
     ```
 
     要指定目标并发请求数，使用 `target_concurrency` 替代 `target_request_rate`。
-    两项都不设置则保持原来的固定 GPU 数搜索。
+    两项均省略时执行并发 `1` 的固定预算 replay 搜索。
   </TabItem>
 </Tabs>
 
@@ -814,8 +828,11 @@ Agentic 负载目标规划会直接校验 AIC 原生推荐的精确拓扑，包�
     发送 `model_name`、`scenario`（`inference_scheduling` 或 `pd_disaggregation`）、
     `gpu_count`、`mean_input_tokens`、`mean_output_tokens`、AIC 系统/后端/数据库，
     以及拓扑结构字段（`tp` 和 `replicas`，或者 prefill/decode 的 TP 和副本数）。
-    可选的 `ttft_target_ms` 和 `tpot_target_ms` 会保留受约束的实验路径；
-    两者都省略时，则在没有 SLO 过滤的情况下估算固定的拓扑结构。
+    此接口仅执行 engine replay，不再使用分析型估算或受约束的实验搜索。
+    即使提供 `ttft_target_ms` 或 `tpot_target_ms`，这些兼容字段也不会过滤或调整部署。
+    不支持大于 1 的流水线并行。输入输出长度固定，`num_requests` 默认 `32`，上限 `100000`。
+    可以提供整数 `target_concurrency` 或正数 `target_request_rate`（泊松到达，每秒请求数），
+    二选一；均省略时使用并发 `1`。
 
     ```json
     {
@@ -832,8 +849,12 @@ Agentic 负载目标规划会直接校验 AIC 原生推荐的精确拓扑，包�
     }
     ```
 
-    响应中包含 `mode`、拓扑结构字段，以及在可测量时的 `ttft_ms`、
-    `tpot_ms` 和 `throughput_tokens_per_sec`。估算值并不能证明符合 SLO。
+    响应包含 `execution_mode: "engine_replay"`、`mode`、拓扑字段、均值 `ttft_ms` 和
+    `tpot_ms`，以及按模拟窗口计算的已完成输出 token 吞吐 `throughput_tokens_per_sec`。
+    `replay_metrics` 包含完成数、样本数和 `duration_ms`。报告不完整或无效时明确失败，
+    不回退到分析方式。模拟结果不能证明符合 SLO，也不代表真实部署精度认证。
+    共享 Python estimate 使用 `aisimulate-engine-replay-v1` 运行配置，接受工作负载并发或
+    QPS 及 `run.num_requests`；估算和推荐均拒绝旧的 `aisimulate-native` 运行配置。
   </TabItem>
   <TabItem value="python-api" label="Python API">
     ```python
@@ -3104,3 +3125,19 @@ AIC 结果解析会在序列化前规范化缺失的可选数据值，并拒绝�
 候选兼容接口可返回经过明确标记的初始化或依赖诊断；未分类的异常细节仍仅记录在后端日志中。
 
 `manual` 等实验名称仅为标签，不代表服务模式。适配器根据结果的拓扑列识别聚合或 PD 模式，也适用于带延迟目标的精确估算。
+
+## 按命名空间的权限预检与编排平台管理员脚本交接
+
+非管理员（`edit`）集群 kubeconfig 在部署启动前及命名空间内资源删除后，使用按命名空间的 SSAR 预检、幂等初始化/清理脚本生成与校验端点：
+
+| 端点 | 契约 |
+| --- | --- |
+| `POST /api/v1/deployments/permission-check` | 接收 `cluster_id`（`clusterId`）、`namespace`、`deployment_name`、`provider_ref`、`storage_volume_id`、`uses_storage`，以及可选的 `manifest`、`namespace_labels`（`namespaceLabels`）、`agentic_deployment_run_id`（`agenticDeploymentRunId`）、`prepared_plan_id`（`preparedPlanId`）、`uses_lws`、`uses_router`、`epp_service_accounts` 和 `subject_override`（`subjectOverride`）。执行按命名空间的 SSAR 检查，返回 `sufficient`、`status`（`sufficient` 或 `admin_required`）、`identity`（`overrideRequired`）、`missing`、`adminOperations`、`userOperations` 和 `warnings`。真实的 `401` kubeconfig 失败会返回 `401 kubeconfig_unauthorized`。 |
+| `POST /api/v1/deployments/permission-remediation` | 接收相同的目标字段，以及在 `identity.overrideRequired` 为 `true` 时可选的 `subject_override`（`subjectOverride`，包含 `kind`、`name`、`namespace`）。返回自包含、幂等的 bash 脚本（`set -euo pipefail`、`umask 077`、无明文密钥），用于创建 `Namespace`、命名空间级 `Role`/`RoleBinding`、EPP `system:auth-delegator` `ClusterRoleBinding`、可选静态 `PersistentVolume` 与绑定的 `PersistentVolumeClaim`，以及 `lens-deployment-bootstrap` 标记 `ConfigMap`。 |
+| `POST /api/v1/deployments/admin-handoff/verify` | 接收目标字段以及可选的 `expected_digest`（`expectedDigest`）。验证 `<deployment-ns>` 中的 `lens-deployment-bootstrap` 标记 `ConfigMap` 及所需的命名空间级 SSAR 权限，返回 `verified`、`sufficient`、`status`（`verified`、`pending` 或 `stale`）、`remainingOperations`、`missing`、`marker`、`warnings` 和 `message`。 |
+| `POST /api/v1/deployments/executions/{execution_id}/cleanup-verify` | 接收 `cleanupDigest`（`cleanup_digest`）、`deleteRecordOnVerify`（`delete_record_on_verify`）和 `forceDeleteRecord`（`force_delete_record`）。在运行清理脚本后验证 `<deployment-ns>` 及其按命名空间的 `ClusterRoleBinding` 已移除（或在 `canVerifyMarker` 为 `false` 且 `forceDeleteRecord` 为 `true` 时删除记录），返回 `verified`、`deleted`、`status`（`deleted`、`verified` 或 `pending_admin_cleanup`）、`remainingOperations`、`marker`、`canVerifyMarker`、`warnings` 和 `message`。 |
+
+### 交接错误响应（`409 Conflict`）
+
+- **`409 cleanup_marker_verification_required`**：当 `canVerifyMarker` 为 `true` 且标记验证尚未通过时，若 `POST /api/v1/deployments/executions/{execution_id}/cleanup-verify` 收到 `forceDeleteRecord=true`，则返回此错误。
+- **`409 deployment_cleanup_permission_denied`**：当 `DELETE /api/v1/deployments/executions/{execution_id}` 或 `DELETE /api/v1/deployments/runs/{run_id}` 在删除命名空间内资源后，若删除 `Namespace` 或 `ClusterRoleBinding` 返回 `403 Forbidden` 时返回。RFC-7807 `extra` 载荷包含顶层字段 `executionId`、`clusterId`、`namespace`、`phase1Completed`、`deletedInNamespace` 和 `adminCleanup`（包含 `clusterId`、`namespace`、`cleanupDigest`、`operations`、`completedOperations`、`script`、`scriptFilename`、`filename`、`instructions`、`marker`、`canVerifyMarker`、`confirmRequired`、`warnings`、`detail`），用于第二阶段清理交接。

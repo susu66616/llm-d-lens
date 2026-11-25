@@ -29,6 +29,8 @@ class AICRequest(BaseModel):
     aic_backend_name: str = Field(default="vllm", min_length=1)
     aic_database_mode: str = Field(default="SILICON", min_length=1)
     max_candidates: int = Field(default=10, ge=1, le=50)
+    num_requests: int = Field(default=32, ge=1, le=100000)
+    max_evaluations: int = Field(default=32, ge=1, le=256)
 
     @model_validator(mode="after")
     def validate_load_target(self) -> Self:
@@ -52,6 +54,9 @@ class AICEstimateRequest(BaseModel):
     gpu_count: int = Field(ge=1)
     mean_input_tokens: int = Field(default=4096, ge=1)
     mean_output_tokens: int = Field(default=256, ge=1)
+    target_concurrency: int | None = Field(default=None, ge=1)
+    target_request_rate: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    num_requests: int = Field(default=32, ge=1, le=100000)
     ttft_target_ms: float | None = Field(default=None, gt=0)
     tpot_target_ms: float | None = Field(default=None, gt=0)
     aic_system_name: str = Field(min_length=1)
@@ -64,6 +69,12 @@ class AICEstimateRequest(BaseModel):
     prefill_replicas: int = Field(default=1, ge=1)
     decode_tp: int = Field(default=1, ge=1)
     decode_replicas: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def validate_load_target(self) -> Self:
+        if self.target_concurrency is not None and self.target_request_rate is not None:
+            raise ValueError("Choose one replay load target: concurrency or request rate")
+        return self
 
 
 class AICSupportResponse(BaseModel):
@@ -78,6 +89,11 @@ class AICSupportResponse(BaseModel):
 class AICSearchResponse(BaseModel):
     configs: list[dict[str, Any]] = Field(default_factory=list)
     chosen_mode: str | None = None
+    execution_mode: Literal["engine_replay"] = "engine_replay"
+    runtime_profile: str = "aisimulate-engine-replay-v1"
+    search_complete: bool = False
+    evaluated_candidates: int = Field(default=0, ge=0)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class AICExperimentResponse(BaseModel):
